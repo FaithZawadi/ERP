@@ -1,0 +1,127 @@
+# docker-compose.yml — QSL ERP Full Stack
+# Development: docker compose up
+# Production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: '3.9'
+
+services:
+
+  # ── Next.js ERP Application ───────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qsl-erp-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Application
+      NODE_ENV:           ${NODE_ENV:-development}
+      JWT_SECRET:         ${JWT_SECRET:-qsl-erp-jwt-secret-change-in-production}
+      JWT_EXPIRES_IN:     ${JWT_EXPIRES_IN:-8h}
+      # Database
+      DATABASE_URL:       postgresql://qsl_user:${POSTGRES_PASSWORD:-qsl_pass_2026}@db:5432/qsl_erp
+      DB_FILE:            ./database/qsl_erp.db
+      # KRA eTIMS
+      KRA_ETIMS_ENV:      ${KRA_ETIMS_ENV:-sandbox}
+      KRA_ETIMS_URL:      ${KRA_ETIMS_URL:-https://etims-sbx-api.kra.go.ke/etims-api}
+      KRA_ETIMS_PIN:      ${KRA_ETIMS_PIN:-}
+      KRA_ETIMS_DEVICE_ID: ${KRA_ETIMS_DEVICE_ID:-}
+      KRA_ETIMS_KEY:      ${KRA_ETIMS_KEY:-}
+      # M-PESA
+      MPESA_ENVIRONMENT:  ${MPESA_ENVIRONMENT:-sandbox}
+      MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-}
+      MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-}
+      MPESA_SHORTCODE:    ${MPESA_SHORTCODE:-}
+      MPESA_PASSKEY:      ${MPESA_PASSKEY:-}
+      MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-http://localhost:3000/api/integrations}
+      # PPIP
+      PPIP_API_URL:       ${PPIP_API_URL:-https://tenders.go.ke/api/v1}
+      PPIP_API_KEY:       ${PPIP_API_KEY:-}
+      # Email
+      SMTP_HOST:          ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:          ${SMTP_PORT:-587}
+      SMTP_USER:          ${SMTP_USER:-}
+      SMTP_PASS:          ${SMTP_PASS:-}
+      # Company
+      COMPANY_NAME:       "Qalibrated Systems Limited"
+      COMPANY_KRA_PIN:    ${COMPANY_KRA_PIN:-}
+    volumes:
+      - app_data:/app/database
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - qsl_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:3000/api/auth"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── PostgreSQL (Production database) ─────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: qsl-erp-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       qsl_erp
+      POSTGRES_USER:     qsl_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qsl_pass_2026}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - qsl_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qsl_user -d qsl_erp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Nginx Reverse Proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: qsl-erp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - app
+    networks:
+      - qsl_net
+
+  # ── Redis (session cache / job queue) ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: qsl-erp-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-qsl_redis_2026}
+    volumes:
+      - redis_data:/data
+    networks:
+      - qsl_net
+
+volumes:
+  postgres_data:
+    driver: local
+  app_data:
+    driver: local
+  uploads:
+    driver: local
+  redis_data:
+    driver: local
+  nginx_logs:
+    driver: local
+
+networks:
+  qsl_net:
+    driver: bridge

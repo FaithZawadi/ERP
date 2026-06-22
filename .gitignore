@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+build/
+
+# Runtime database (generated via npm run db:init && db:seed)
+database/*.db
+database/*.db-journal
+database/*.sqlite
+
+# Uploaded files (runtime user content)
+uploads/**/*
+!uploads/**/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+npm-debug.log*
+
+# Environment / secrets — keep only the example
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
