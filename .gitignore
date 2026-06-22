@@ -10,6 +10,8 @@ build/
 database/*.db
 database/*.db-journal
 database/*.sqlite
+# ...but DO ship the known-good seed template used to bootstrap a fresh host
+!database/seed-template.db
 
 # Uploaded files (runtime user content)
 uploads/**/*

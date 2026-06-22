@@ -10,7 +10,7 @@ const initSQLite = async () => {
   const SQL = await initSqlJs();
   
   let db;
-  const dbPath = path.join(__dirname, 'qsl_erp.db');
+  const dbPath = process.env.SQLITE_PATH || path.join(__dirname, 'qsl_erp.db');
   
   if (fs.existsSync(dbPath)) {
     const fileBuffer = fs.readFileSync(dbPath);

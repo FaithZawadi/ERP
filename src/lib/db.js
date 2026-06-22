@@ -35,7 +35,9 @@ const USE_POSTGRES = !!process.env.DATABASE_URL;
 let _db  = null;
 let _SQL = null;
 
-const DB_PATH = path.join(process.cwd(), 'database', 'qsl_erp.db');
+// SQLITE_PATH lets a hosted deployment point the file DB at a persistent disk
+// (e.g. Render disk mounted at /var/data) so data survives restarts/redeploys.
+const DB_PATH = process.env.SQLITE_PATH || path.join(process.cwd(), 'database', 'qsl_erp.db');
 
 async function getDB_sqlite() {
   if (_db) return _db;

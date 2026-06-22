@@ -3,6 +3,9 @@
   "version": "2.0.0",
   "description": "Qalibrated Systems Limited — Enterprise Resource Planning System",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",

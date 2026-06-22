@@ -1,0 +1,45 @@
+# Render Blueprint — deploy QSL ERP as an always-on development demo.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# How it works: builds the existing Node-20 Dockerfile, then (overriding the
+# Dockerfile CMD) bootstraps the file database from the committed seed template
+# on first boot and starts Next.js. The seed template carries all demo data,
+# settings and module flags, so the demo is fully populated immediately.
+#
+# PERSISTENCE: the free plan has no persistent disk, so /var/data is ephemeral
+# — user-entered data resets to the seed template whenever the instance
+# restarts (free instances sleep after ~15 min idle). To KEEP data across
+# restarts, change `plan: free` to `plan: starter` and uncomment the `disk:`
+# block at the bottom (a Render disk requires a paid instance type).
+
+services:
+  - type: web
+    name: qsl-erp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Override the Dockerfile CMD: bootstrap the DB from the seed template on
+    # first boot (does NOT re-run init/seed, so existing data is preserved when
+    # a persistent disk is attached), then start the server.
+    dockerCommand: >-
+      sh -c 'mkdir -p "$UPLOAD_DIR" "$(dirname "$SQLITE_PATH")" && { [ -f "$SQLITE_PATH" ] || cp database/seed-template.db "$SQLITE_PATH"; } && exec npm start'
+    healthCheckPath: /api/branding
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SQLITE_PATH
+        value: /var/data/qsl_erp.db
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: JWT_SECRET
+        generateValue: true   # Render generates a strong secret automatically
+
+    # ── Persistence (recommended for shared user testing) ──────────────────
+    # Render disks require a paid instance type. To keep data across restarts:
+    #   1. change `plan: free` above to `plan: starter`
+    #   2. uncomment the block below
+    # disk:
+    #   name: qsl-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
