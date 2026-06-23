@@ -1948,7 +1948,8 @@ const SETTINGS_REGISTRY = [
     {key:'company.phone',      label:'Phone',      type:'text', def:'+254 714 999 996'},
     {key:'company.email',      label:'Email',      type:'text', def:'info@qalibrated.co.ke'},
   ]},
-  { category:'branding', label:'Branding & Theme', help:'Logo upload is under Settings → Branding. Colours, name and font below apply across the whole app.', fields:[
+  { category:'branding', label:'Branding & Theme', help:'Logo, colours, name and font apply across the whole app (sidebar, login, exports).', fields:[
+    {key:'branding.logo_url', label:'Logo', type:'logo', def:'/logo.svg'},
     {key:'branding.company_display_name', label:'Display Name', type:'text', def:'QSL ERP'},
     {key:'branding.primary_color', label:'Primary Colour', type:'color', def:'#1B3A5C'},
     {key:'branding.accent_color',  label:'Accent Colour',  type:'color', def:'#C8960C'},
@@ -2209,6 +2210,21 @@ function AdminModule({ api, user }) {
                       </select>
                     ):f.type==='json'?(
                       <textarea value={dispVal(f)} onChange={e=>setVal(f.key,e.target.value)} rows={4} style={{width:'100%',padding:'8px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12,fontFamily:'monospace'}}/>
+                    ):f.type==='logo'?(
+                      <div>
+                        <div style={{padding:10,background:T.navyD,borderRadius:6,marginBottom:6,textAlign:'center'}}>
+                          {dispVal(f)?<img src={dispVal(f)} alt="logo" style={{maxHeight:42,maxWidth:'100%'}}/>:<span style={{color:T.mgrey,fontSize:11}}>No logo</span>}
+                        </div>
+                        <input type="file" accept="image/svg+xml,image/png,image/jpeg,image/webp" style={{fontSize:12,marginBottom:6,display:'block'}} onChange={e=>{
+                          const file=e.target.files?.[0]; if(!file)return;
+                          if(file.size>512*1024){setMsg({type:'error',text:'Logo must be under 500 KB — use an SVG or small PNG'});return;}
+                          const rd=new FileReader(); rd.onload=()=>setVal(f.key, rd.result); rd.readAsDataURL(file);
+                        }}/>
+                        {String(dispVal(f)).startsWith('data:')
+                          ? <div style={{fontSize:11,color:T.green}}>✓ Custom image staged — click “Save Changes” to apply.</div>
+                          : <input value={dispVal(f)} onChange={e=>setVal(f.key,e.target.value)} placeholder="/logo.svg or https://…" style={{width:'100%',padding:'7px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>}
+                        <Btn size="sm" variant="ghost" style={{marginTop:6}} onClick={()=>setVal(f.key,'/logo.svg')}>Reset to default</Btn>
+                      </div>
                     ):(
                       <input type={f.type==='number'||f.type==='percent'?'number':'text'} step="any" value={dispVal(f)} onChange={e=>setVal(f.key,e.target.value)} style={{width:'100%',padding:'8px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:13}}/>
                     )}
@@ -3593,22 +3609,28 @@ function Settings({ api, user }) {
     else setBrandingMsg({type:'error',text:r?.error||'Failed to save'});
   };
 
+  // Store the logo as a data URL in the branding.logo_url setting. The app has
+  // no /uploads file server (Next only serves /public), so a data URL is the
+  // reliable, persistent way to set a custom logo — it renders directly in an
+  // <img> and survives in the DB across restarts.
   const uploadLogo = async () => {
     if(!logoFile){ setBrandingMsg({type:'error',text:'Choose a logo file first'}); return; }
+    if(logoFile.size > 512*1024){ setBrandingMsg({type:'error',text:'Logo must be under 500 KB — use an SVG or a small PNG'}); return; }
     setBrandingSaving(true);
-    const fd = new FormData();
-    fd.append('file', logoFile);
-    try {
-      const token = typeof window!=='undefined' ? localStorage.getItem('qsl_token') : null;
-      const res = await fetch('/api/admin', { method:'POST', headers:{Authorization:`Bearer ${token}`}, body: fd });
-      const r = await res.json();
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result;
+      const r = await api.post('/api/admin', {action:'update_setting', key:'branding.logo_url', value:dataUrl});
       setBrandingSaving(false);
-      if(r?.success){ setBrandingMsg({type:'success',text:'Logo updated.'}); setBranding({...branding,logo_url:r.data.logo_url}); setLogoFile(null); }
-      else setBrandingMsg({type:'error',text:r?.error||'Upload failed'});
-    } catch(e) {
-      setBrandingSaving(false);
-      setBrandingMsg({type:'error',text:'Upload failed: '+e.message});
-    }
+      if(r?.success){ setBrandingMsg({type:'success',text:'Logo updated — reload to see it in the sidebar.'}); setBranding({...branding,logo_url:dataUrl}); setLogoFile(null); }
+      else setBrandingMsg({type:'error',text:r?.error||'Save failed'});
+    };
+    reader.onerror = () => { setBrandingSaving(false); setBrandingMsg({type:'error',text:'Could not read file'}); };
+    reader.readAsDataURL(logoFile);
+  };
+  const resetLogo = async () => {
+    const r = await api.post('/api/admin', {action:'update_setting', key:'branding.logo_url', value:'/logo.svg'});
+    if(r?.success){ setBrandingMsg({type:'success',text:'Logo reset to the default QSL mark.'}); setBranding({...branding,logo_url:'/logo.svg'}); }
   };
 
   const verify = async (keyId) => {
@@ -3702,14 +3724,17 @@ function Settings({ api, user }) {
 
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
           <Card>
-            <SectionHeader title="Logo"/>
+            <SectionHeader title="Logo" sub="Shown in the sidebar & login — both on a dark background, so a light/gold logo works best. SVG or PNG, under 500 KB."/>
             {branding.logo_url&&(
-              <div style={{padding:'16px',background:T.offwt,borderRadius:8,marginBottom:12,textAlign:'center'}}>
+              <div style={{padding:'16px',background:T.navyD,borderRadius:8,marginBottom:12,textAlign:'center'}}>
                 <img src={branding.logo_url} alt="Current logo" style={{maxHeight:60,maxWidth:'100%'}}/>
               </div>
             )}
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>setLogoFile(e.target.files?.[0]||null)} style={{fontSize:12,marginBottom:10}}/>
-            <Btn size="sm" disabled={!logoFile||brandingSaving} onClick={uploadLogo}>{brandingSaving?'Uploading...':'Upload Logo'}</Btn>
+            <input type="file" accept="image/svg+xml,image/png,image/jpeg,image/webp" onChange={e=>setLogoFile(e.target.files?.[0]||null)} style={{fontSize:12,marginBottom:10,display:'block'}}/>
+            <div style={{display:'flex',gap:8}}>
+              <Btn size="sm" disabled={!logoFile||brandingSaving} onClick={uploadLogo}>{brandingSaving?'Saving…':'Update Logo'}</Btn>
+              <Btn size="sm" variant="ghost" disabled={brandingSaving} onClick={resetLogo}>Reset to default</Btn>
+            </div>
 
             <div style={{marginTop:20}}>
               <Input label="Company Display Name" value={branding.company_display_name||''} onChange={v=>setBranding({...branding,company_display_name:v})}/>
