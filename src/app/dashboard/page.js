@@ -488,6 +488,12 @@ function Finance({ api }) {
   const [matchForm,setMatchForm]=useState({lpo_id:'',invoice_no:'',invoice_amount:''});
   const [adhoc,setAdhoc]=useState({payee:'',amount:'',purpose:''});
   const [batchSel,setBatchSel]=useState([]);
+  // GL maturity — FIN-001/002/003
+  const [journals,setJournals]=useState([]);
+  const [monthEnd,setMonthEnd]=useState(null);
+  const [plDept,setPlDept]=useState([]);
+  const [closePeriod,setClosePeriod]=useState('2026-06');
+  const [jForm,setJForm]=useState({date:new Date().toISOString().split('T')[0],description:'',auto_reverse:false,reversal_date:'',lines:[{account_id:'',debit:'',credit:'',dept:''},{account_id:'',debit:'',credit:'',dept:''}]});
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -502,6 +508,8 @@ function Finance({ api }) {
       if(b?.success)setBatches(b.data); if(l?.success)setLpos(l.data);
     }
     if(t==='payauth'){ const r=await api.get('/api/finance?section=payment_authority'); if(r?.success)setAuthMatrix(r.data); }
+    if(t==='journals'){ const [j,a]=await Promise.all([api.get('/api/finance?section=journals'),api.get('/api/finance?section=accounts')]); if(j?.success)setJournals(j.data); if(a?.success)setAccounts(a.data); }
+    if(t==='monthend'){ const [m,p]=await Promise.all([api.get(`/api/finance?section=month_end&period=${closePeriod}`),api.get(`/api/finance?section=pl_department&period=${closePeriod}`)]); if(m?.success)setMonthEnd(m.data); if(p?.success)setPlDept(p.data); }
     setLoading(false);
   };
 
@@ -550,7 +558,25 @@ function Finance({ api }) {
   const createBatch = async () => { if(!batchSel.length){setMsg({type:'error',text:'Select approved vouchers to batch'});return;} const r=await api.post('/api/finance',{action:'create_batch',voucher_ids:batchSel}); if(r?.success){setMsg({type:'success',text:`Batch ${r.data.batch_no} prepared (${r.data.voucher_count} vouchers)`});setBatchSel([]);load('payments');} else setMsg({type:'error',text:r?.error}); };
   const signBatch = async (id,role) => { const r=await api.post('/api/finance',{action:'sign_batch',batch_id:id,signer_role:role,signature_key:`QSL-DS-${role}-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:`Batch ${r.data.status}`});load('payments');} else setMsg({type:'error',text:r?.error}); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'General Ledger'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
+  // ── GL maturity handlers — FIN-002/003 ──
+  const jLineSet = (i,k,v) => setJForm(f=>({...f,lines:f.lines.map((l,idx)=>idx===i?{...l,[k]:v}:l)}));
+  const jLineAdd = () => setJForm(f=>({...f,lines:[...f.lines,{account_id:'',debit:'',credit:'',dept:''}]}));
+  const createJournal = async () => {
+    const lines = jForm.lines.filter(l=>l.account_id && (parseFloat(l.debit)||parseFloat(l.credit)))
+      .map(l=>({account_id:l.account_id,debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0,dept:l.dept}));
+    const dr=lines.reduce((s,l)=>s+l.debit,0), cr=lines.reduce((s,l)=>s+l.credit,0);
+    if(lines.length<2||Math.abs(dr-cr)>0.01){ setMsg({type:'error',text:`Journal must balance — debits ${dr} vs credits ${cr}`}); return; }
+    const r=await api.post('/api/finance',{action:'create_journal',date:jForm.date,description:jForm.description,lines,auto_reverse:jForm.auto_reverse,reversal_date:jForm.auto_reverse?jForm.reversal_date:null});
+    if(r?.success){ setMsg({type:'success',text:`Journal ${r.data.entry_no} drafted — needs review then approval`}); setModal(null); setJForm({date:new Date().toISOString().split('T')[0],description:'',auto_reverse:false,reversal_date:'',lines:[{account_id:'',debit:'',credit:'',dept:''},{account_id:'',debit:'',credit:'',dept:''}]}); load('journals'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+  const jAction = async (action,entry_id) => { const r=await api.post('/api/finance',{action,entry_id,signature_key:`QSL-DS-${Date.now()}`}); if(r?.success){ setMsg({type:'success',text:r.data.reversal_no?`Done — reversal ${r.data.reversal_no}`:'Done'}); load('journals'); } else setMsg({type:'error',text:r?.error}); };
+  const reloadMonthEnd = async (p) => { setClosePeriod(p); const [m,pl]=await Promise.all([api.get(`/api/finance?section=month_end&period=${p}`),api.get(`/api/finance?section=pl_department&period=${p}`)]); if(m?.success)setMonthEnd(m.data); if(pl?.success)setPlDept(pl.data); };
+  const openClose = async () => { const r=await api.post('/api/finance',{action:'open_close_period',period:closePeriod}); if(r?.success){setMsg({type:'success',text:`Close started for ${closePeriod}`});reloadMonthEnd(closePeriod);} else setMsg({type:'error',text:r?.error}); };
+  const toggleCloseItem = async (key,done) => { const r=await api.post('/api/finance',{action:'update_close_item',period:closePeriod,key,done}); if(r?.success)reloadMonthEnd(closePeriod); else setMsg({type:'error',text:r?.error}); };
+  const finalizeClose = async () => { const r=await api.post('/api/finance',{action:'finalize_close',period:closePeriod,signature_key:`QSL-DS-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:`${closePeriod} closed & locked`});reloadMonthEnd(closePeriod);} else setMsg({type:'error',text:r?.error}); };
+
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -663,6 +689,55 @@ function Finance({ api }) {
         </>
       )}
 
+      {!loading&&tab==='journals'&&(<>
+        <Alert type="info"><strong>FIN-002:</strong> journals require three distinct users — preparer → reviewer → approver. Approval posts the entry; posted journals can't be deleted, only reversed. Accruals can auto-reverse on a chosen date.</Alert>
+        <SectionHeader title="Journal Entries" action={<Btn size="sm" onClick={()=>setModal('journal')}>+ New Journal</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Entry','Date','Description','Amount','Status','Workflow']}
+            empty="No journals yet."
+            rows={journals.map(j=>[
+              <span style={{fontFamily:'monospace',fontSize:11}}>{j.entry_no}</span>, fmt.date(j.date),
+              <span>{j.description}{j.is_reversal?<Badge variant="purple" size="sm"> reversal</Badge>:''}</span>,
+              fmt.kes(j.total_debit),
+              <Badge variant={j.status==='posted'?'green':j.status==='reviewed'?'blue':'amber'}>{j.status}</Badge>,
+              j.status==='draft'?<Btn size="sm" onClick={()=>jAction('review_journal',j.id)}>Review</Btn>
+              :j.status==='reviewed'?<Btn size="sm" onClick={()=>jAction('approve_journal',j.id)}>Approve & Post</Btn>
+              :j.status==='posted'&&!j.is_reversal&&!j.reversed_by?<Btn size="sm" variant="ghost" onClick={()=>jAction('reverse_journal',j.id)}>Reverse</Btn>
+              :'✓',
+            ])}/>
+        </Card>
+      </>)}
+
+      {!loading&&tab==='monthend'&&monthEnd&&(<>
+        <Alert type="info"><strong>FIN-003:</strong> complete every checklist item, then the CFO signs off to close the period. A closed period is locked — no journals can be dated into it.</Alert>
+        <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:14}}>
+          <label style={{fontSize:12,fontWeight:600,color:T.dgrey}}>Period:</label>
+          <input type="month" value={closePeriod} onChange={e=>reloadMonthEnd(e.target.value)} style={{padding:'7px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:13}}/>
+          <Badge variant={monthEnd.status==='closed'?'green':monthEnd.status==='open'?'amber':'default'}>{monthEnd.status}</Badge>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
+          <Card>
+            <SectionHeader title="Close Checklist"
+              action={monthEnd.status==='not_started'?<Btn size="sm" onClick={openClose}>Start Close</Btn>
+                :monthEnd.status==='open'?<Btn size="sm" onClick={finalizeClose} disabled={!monthEnd.checklist.every(i=>i.done)}>CFO Close & Sign</Btn>:null}/>
+            {monthEnd.checklist.map(it=>(
+              <label key={it.key} style={{display:'flex',gap:8,alignItems:'center',padding:'7px 0',borderBottom:`1px solid ${T.offwt}`,fontSize:13,opacity:monthEnd.status==='closed'?0.7:1}}>
+                <input type="checkbox" checked={!!it.done} disabled={monthEnd.status!=='open'} onChange={()=>toggleCloseItem(it.key,!it.done)}/>
+                <span>{it.label}</span>
+              </label>
+            ))}
+            {monthEnd.status==='closed'&&<div style={{marginTop:10,padding:'8px 10px',background:T.greenL,borderRadius:6,fontSize:12,color:T.green}}>🔐 Closed & signed — {fmt.date(monthEnd.closed_at)}</div>}
+          </Card>
+          <Card>
+            <SectionHeader title="P&L by Department" sub={`Posted journals · ${closePeriod}`}/>
+            <DataTable headers={['Department','Income','Expense','Net']}
+              empty="No posted journals in this period."
+              rows={plDept.map(r=>[<strong>{r.dept}</strong>,fmt.kes(r.income),fmt.kes(r.expense),
+                <span style={{fontWeight:700,color:(r.net||0)>=0?T.green:T.red}}>{fmt.kes(r.net)}</span>])}/>
+          </Card>
+        </div>
+      </>)}
+
       {!loading&&tab==='payments'&&(<>
         <Alert type="info"><strong>Accounts Payable:</strong> supplier invoices must clear a 3-way match (LPO ↔ GRN ↔ invoice) before a payment voucher can be raised (FIN-006). Voucher amount sets the required approval authority (FIN-007); approved vouchers are paid in batches signed FM → CFO → MD (FIN-008).</Alert>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:16}}>
@@ -765,6 +840,37 @@ function Finance({ api }) {
           <Input label="Amount (Kshs)" type="number" value={adhoc.amount} onChange={v=>setAdhoc({...adhoc,amount:v})} required placeholder="0"/>
           <Input label="Purpose" value={adhoc.purpose} onChange={v=>setAdhoc({...adhoc,purpose:v})} required/>
           <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={raiseAdhoc} disabled={!adhoc.payee||!adhoc.amount||!adhoc.purpose}>Raise Voucher</Btn></div>
+        </Modal>
+      )}
+
+      {modal==='journal'&&(
+        <Modal title="New Journal Entry (FIN-002)" onClose={()=>setModal(null)} width={680}>
+          <Alert type="info">Drafted by you (preparer). It must then be reviewed and approved by two other users before it posts.</Alert>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 2fr',gap:12}}>
+            <Input label="Date" type="date" value={jForm.date} onChange={v=>setJForm({...jForm,date:v})}/>
+            <Input label="Description" value={jForm.description} onChange={v=>setJForm({...jForm,description:v})} required placeholder="e.g. June rent accrual"/>
+          </div>
+          <div style={{marginTop:8,marginBottom:6,fontSize:11,fontWeight:700,color:T.dgrey,textTransform:'uppercase'}}>Lines</div>
+          {jForm.lines.map((l,i)=>(
+            <div key={i} style={{display:'grid',gridTemplateColumns:'2.5fr 1fr 1fr 1.2fr',gap:6,marginBottom:6}}>
+              <select value={l.account_id} onChange={e=>jLineSet(i,'account_id',e.target.value)} style={{padding:'7px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}>
+                <option value="">Account…</option>
+                {accounts.filter(a=>a.type!=='header').map(a=><option key={a.id} value={a.id}>{a.code} {a.name}</option>)}
+              </select>
+              <input type="number" placeholder="Debit" value={l.debit} onChange={e=>jLineSet(i,'debit',e.target.value)} style={{padding:'7px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>
+              <input type="number" placeholder="Credit" value={l.credit} onChange={e=>jLineSet(i,'credit',e.target.value)} style={{padding:'7px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>
+              <input placeholder="Dept" value={l.dept} onChange={e=>jLineSet(i,'dept',e.target.value)} style={{padding:'7px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>
+            </div>
+          ))}
+          <Btn size="sm" variant="ghost" onClick={jLineAdd}>+ Add line</Btn>
+          <div style={{marginTop:12,padding:'8px 10px',background:T.offwt,borderRadius:6}}>
+            <label style={{display:'flex',gap:8,alignItems:'center',fontSize:12,fontWeight:600}}>
+              <input type="checkbox" checked={jForm.auto_reverse} onChange={e=>setJForm({...jForm,auto_reverse:e.target.checked})}/>
+              Accrual — auto-reverse on a future date
+            </label>
+            {jForm.auto_reverse&&<Input label="Reversal date" type="date" value={jForm.reversal_date} onChange={v=>setJForm({...jForm,reversal_date:v})}/>}
+          </div>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:10}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createJournal} disabled={!jForm.description}>Create Draft</Btn></div>
         </Modal>
       )}
     </div>

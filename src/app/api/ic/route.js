@@ -88,7 +88,28 @@ export async function POST(req) {
 
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_IC_TRANSACTION', module: 'InterCompany', recordId: id, newValue: { entity_id, type, contract_value, fee_amount, fee_pct: actualPct } });
 
-        return ok({ id, fee_amount, fee_pct: actualPct }, 201);
+        // FIN-005: auto-generate the matching GL journal for the inter-company
+        // fee — Dr Inter-company receivable, Cr Inter-company income — posted
+        // and tagged to this transaction. Uses the dedicated COA account types.
+        let journal_no = null;
+        try {
+          const recv = await queryOne(`SELECT id FROM chart_of_accounts WHERE type='ic_receivable' AND is_active=1 LIMIT 1`);
+          const inc  = await queryOne(`SELECT id FROM chart_of_accounts WHERE type='ic_income' AND is_active=1 LIMIT 1`);
+          if (recv && inc) {
+            const jid = uuid(); journal_no = `JV-IC-${Date.now()}`;
+            await transaction(async ({ run: dbRun }) => {
+              await dbRun(`INSERT INTO journal_entries (id,entry_no,date,description,reference,module,module_ref,prepared_by,approved_by,approved_at,status)
+                           VALUES (?,?,?,?,?, 'InterCompany', ?, ?, ?, datetime('now'), 'posted')`,
+                [jid, journal_no, new Date().toISOString().split('T')[0], `Inter-company ${type.replace('_',' ')} fee`, id, id, auth.user.employee_id, auth.user.employee_id]);
+              await dbRun(`INSERT INTO journal_lines (id,entry_id,account_id,description,debit,credit) VALUES (?,?,?,?,?,0)`,
+                [uuid(), jid, recv.id, 'Inter-company receivable', fee_amount]);
+              await dbRun(`INSERT INTO journal_lines (id,entry_id,account_id,description,debit,credit) VALUES (?,?,?,?,0,?)`,
+                [uuid(), jid, inc.id, 'Inter-company fee income', fee_amount]);
+            });
+          }
+        } catch (e) { console.error('[IC journal]', e.message); }
+
+        return ok({ id, fee_amount, fee_pct: actualPct, journal_no }, 201);
       }
 
       case 'record_collection': {

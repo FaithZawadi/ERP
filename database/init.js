@@ -249,6 +249,8 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   approved_at     TEXT,
   is_reversal     INTEGER DEFAULT 0,
   reversed_by     TEXT,
+  auto_reverse    INTEGER DEFAULT 0,   -- accrual: auto-create a reversing entry on posting (FIN-002)
+  reversal_date   TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
@@ -360,6 +362,21 @@ CREATE TABLE IF NOT EXISTS payment_batches (
   cfo_sig         TEXT, cfo_signed_at  TEXT,
   md_sig          TEXT, md_signed_at   TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Month-end close (FIN-003): a per-period checklist (reconciliations,
+-- prepayments, accruals, depreciation run). Closing requires every item done
+-- plus the CFO's digital sign-off, after which the period is locked — posting
+-- a journal dated in a closed period is refused (FIN-002).
+CREATE TABLE IF NOT EXISTS month_end_close (
+  id          TEXT PRIMARY KEY,
+  period      TEXT UNIQUE NOT NULL,   -- YYYY-MM
+  status      TEXT DEFAULT 'open',     -- open | closed
+  checklist   TEXT,                     -- JSON [{key,label,done,done_by,done_at}]
+  cfo_sig     TEXT,
+  closed_by   TEXT REFERENCES employees(id),
+  closed_at   TEXT,
+  created_at  TEXT DEFAULT (datetime('now'))
 );
 
 -- ═══════════════════════════════════════════════════════════════

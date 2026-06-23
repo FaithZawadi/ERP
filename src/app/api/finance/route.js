@@ -37,6 +37,24 @@ async function requiredAuthority(amount) {
   return { level:'md', rank:5, limit:null };
 }
 
+// ── MONTH-END CLOSE (FIN-003) ─────────────────────────────────────────────────
+const DEFAULT_CLOSE_CHECKLIST = [
+  { key:'bank_recon',      label:'Bank reconciliations completed',        done:false },
+  { key:'prepayments',     label:'Prepayments reviewed & amortised',      done:false },
+  { key:'accruals',        label:'Accruals raised',                       done:false },
+  { key:'depreciation',    label:'Monthly depreciation run posted',       done:false },
+  { key:'ic_recon',        label:'Inter-company balances reconciled',     done:false },
+  { key:'supplier_recon',  label:'Supplier statement reconciliations',    done:false },
+];
+// A period is locked once its month-end close is finalised — no journals may be
+// dated into it (FIN-002 "no manual deletion/alteration of posted periods").
+async function periodLocked(date) {
+  if (!date) return false;
+  const period = String(date).slice(0, 7); // YYYY-MM
+  const row = await queryOne(`SELECT status FROM month_end_close WHERE period=?`, [period]);
+  return row?.status === 'closed';
+}
+
 // ── GET /api/finance?section=imprest|payroll|gl|stats ────────────────────────
 
 export async function GET(req) {
@@ -151,6 +169,49 @@ export async function GET(req) {
            ORDER BY b.created_at DESC`
         );
         return ok(rows);
+      }
+
+      // ── Journal entries with workflow state (FIN-002) ────────────────────
+      case 'journals': {
+        const entries = await query(
+          `SELECT je.*, p.first_name||' '||p.last_name as prepared_by_name,
+                  r.first_name||' '||r.last_name as reviewed_by_name,
+                  a.first_name||' '||a.last_name as approved_by_name,
+                  (SELECT SUM(debit) FROM journal_lines WHERE entry_id=je.id) as total_debit
+           FROM journal_entries je
+           LEFT JOIN employees p ON je.prepared_by=p.id
+           LEFT JOIN employees r ON je.reviewed_by=r.id
+           LEFT JOIN employees a ON je.approved_by=a.id
+           ORDER BY je.created_at DESC LIMIT ? OFFSET ?`, [limit, (page-1)*limit]
+        );
+        return ok(entries);
+      }
+
+      // ── Month-end close checklist for a period (FIN-003) ─────────────────
+      case 'month_end': {
+        const p = period || new Date().toISOString().slice(0,7);
+        let row = await queryOne(`SELECT * FROM month_end_close WHERE period=?`, [p]);
+        if (!row) return ok({ period:p, status:'not_started', checklist: DEFAULT_CLOSE_CHECKLIST });
+        return ok({ ...row, checklist: JSON.parse(row.checklist || '[]') });
+      }
+
+      // ── P&L by department from POSTED journals (FIN-001) ─────────────────
+      case 'pl_department': {
+        const where = period ? `AND je.date LIKE ?` : '';
+        const params = period ? [`${period}%`] : [];
+        const rows = await query(
+          `SELECT COALESCE(NULLIF(jl.dept,''),'(unassigned)') as dept,
+                  SUM(CASE WHEN coa.category='Income'  THEN jl.credit - jl.debit ELSE 0 END) as income,
+                  SUM(CASE WHEN coa.category='Expense' THEN jl.debit - jl.credit ELSE 0 END) as expense
+           FROM journal_lines jl
+           JOIN journal_entries je ON jl.entry_id=je.id AND je.status='posted'
+           JOIN chart_of_accounts coa ON jl.account_id=coa.id
+           WHERE 1=1 ${where}
+           GROUP BY COALESCE(NULLIF(jl.dept,''),'(unassigned)')
+           ORDER BY dept`, params
+        );
+        const data = rows.map(r => ({ ...r, net: (r.income||0) - (r.expense||0) }));
+        return ok(data);
       }
 
       // ── The payment authority matrix (live from settings) — FIN-007 ──────
@@ -353,11 +414,12 @@ export async function POST(req) {
         return ok({ signed: true, status: newStatus, signed_at: now, payslips_sent });
       }
 
-      // ── Journal entry ─────────────────────────────────────────────────────
+      // ── FIN-002: create journal (preparer) — starts as draft ─────────────
       case 'create_journal': {
-        const { date, description, reference, lines } = body;
+        const { date, description, reference, lines, auto_reverse, reversal_date } = body;
         if (!date || !description || !lines?.length)
           return err('date, description and lines required', 400);
+        if (await periodLocked(date)) return err(`FIN-003: ${String(date).slice(0,7)} is closed — no journals can be dated into a locked period`, 403);
 
         // Validate debit = credit
         const totalDebit  = lines.reduce((s, l) => s + (l.debit  || 0), 0);
@@ -370,9 +432,9 @@ export async function POST(req) {
 
         await transaction(async ({ run: dbRun }) => {
           await dbRun(
-            `INSERT INTO journal_entries (id,entry_no,date,description,reference,prepared_by,status)
-             VALUES (?,?,?,?,?,?,'draft')`,
-            [entryId, entry_no, date, description, reference, auth.user.employee_id]
+            `INSERT INTO journal_entries (id,entry_no,date,description,reference,prepared_by,status,auto_reverse,reversal_date)
+             VALUES (?,?,?,?,?,?,'draft',?,?)`,
+            [entryId, entry_no, date, description, reference, auth.user.employee_id, auto_reverse?1:0, reversal_date||null]
           );
           for (const l of lines) {
             await dbRun(
@@ -382,8 +444,112 @@ export async function POST(req) {
             );
           }
         });
-
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_JOURNAL', module: 'Finance', recordId: entryId, newValue: { entry_no } });
         return ok({ entry_id: entryId, entry_no }, 201);
+      }
+
+      // ── FIN-002: reviewer (must differ from preparer) ────────────────────
+      case 'review_journal': {
+        const { entry_id } = body;
+        const je = await queryOne(`SELECT * FROM journal_entries WHERE id=?`, [entry_id]);
+        if (!je) return err('Journal not found', 404);
+        if (je.status !== 'draft') return err(`Cannot review — status is ${je.status}`, 409);
+        if (je.prepared_by === auth.user.employee_id) return err('FIN-002: the reviewer must be a different user from the preparer', 403);
+        await run(`UPDATE journal_entries SET reviewed_by=?, status='reviewed' WHERE id=?`, [auth.user.employee_id, entry_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'REVIEW_JOURNAL', module: 'Finance', recordId: entry_id });
+        return ok({ reviewed: true });
+      }
+
+      // ── FIN-002: approver (distinct from preparer & reviewer) → posts ────
+      case 'approve_journal': {
+        const { entry_id, signature_key } = body;
+        const je = await queryOne(`SELECT * FROM journal_entries WHERE id=?`, [entry_id]);
+        if (!je) return err('Journal not found', 404);
+        if (je.status !== 'reviewed') return err(`Cannot approve — must be reviewed first (status ${je.status})`, 409);
+        if (auth.user.employee_id === je.prepared_by || auth.user.employee_id === je.reviewed_by)
+          return err('FIN-002: the approver must be distinct from both the preparer and the reviewer', 403);
+        if (await periodLocked(je.date)) return err(`FIN-003: ${String(je.date).slice(0,7)} is closed`, 403);
+
+        await run(`UPDATE journal_entries SET approved_by=?, approved_sig=?, approved_at=datetime('now'), status='posted' WHERE id=?`,
+          [auth.user.employee_id, signature_key||`QSL-DS-${auth.user.role}-${Date.now()}`, entry_id]);
+
+        // Accrual auto-reversal: post a reversing entry dated reversal_date.
+        let reversal_no = null;
+        if (je.auto_reverse && je.reversal_date) {
+          const lines = await query(`SELECT * FROM journal_lines WHERE entry_id=?`, [entry_id]);
+          const revId = uuid(); reversal_no = `JV-${Date.now()}-R`;
+          await transaction(async ({ run: dbRun }) => {
+            await dbRun(`INSERT INTO journal_entries (id,entry_no,date,description,reference,prepared_by,reviewed_by,approved_by,approved_at,status,is_reversal,reversed_by)
+                         VALUES (?,?,?,?,?,?,?,?,datetime('now'),'posted',1,?)`,
+              [revId, reversal_no, je.reversal_date, `Auto-reversal of ${je.entry_no}`, je.reference, auth.user.employee_id, je.reviewed_by, auth.user.employee_id, je.entry_no]);
+            for (const l of lines) {
+              await dbRun(`INSERT INTO journal_lines (id,entry_id,account_id,description,debit,credit,dept,project_id) VALUES (?,?,?,?,?,?,?,?)`,
+                [uuid(), revId, l.account_id, `Reversal: ${l.description||''}`, l.credit||0, l.debit||0, l.dept||'', l.project_id||'']);
+            }
+          });
+        }
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'POST_JOURNAL', module: 'Finance', recordId: entry_id, newValue: { reversal_no } });
+        return ok({ posted: true, reversal_no });
+      }
+
+      // ── FIN-002: reverse a posted journal (swapped entry) ────────────────
+      case 'reverse_journal': {
+        const { entry_id } = body;
+        const je = await queryOne(`SELECT * FROM journal_entries WHERE id=?`, [entry_id]);
+        if (!je) return err('Journal not found', 404);
+        if (je.status !== 'posted') return err('Only posted journals can be reversed', 409);
+        const lines = await query(`SELECT * FROM journal_lines WHERE entry_id=?`, [entry_id]);
+        const revId = uuid(); const reversal_no = `JV-${Date.now()}-R`;
+        const today = new Date().toISOString().split('T')[0];
+        if (await periodLocked(today)) return err('FIN-003: current period is closed', 403);
+        await transaction(async ({ run: dbRun }) => {
+          await dbRun(`INSERT INTO journal_entries (id,entry_no,date,description,reference,prepared_by,reviewed_by,approved_by,approved_at,status,is_reversal,reversed_by)
+                       VALUES (?,?,?,?,?,?,?,?,datetime('now'),'posted',1,?)`,
+            [revId, reversal_no, today, `Reversal of ${je.entry_no}`, je.reference, auth.user.employee_id, auth.user.employee_id, auth.user.employee_id, je.entry_no]);
+          for (const l of lines) {
+            await dbRun(`INSERT INTO journal_lines (id,entry_id,account_id,description,debit,credit,dept,project_id) VALUES (?,?,?,?,?,?,?,?)`,
+              [uuid(), revId, l.account_id, `Reversal: ${l.description||''}`, l.credit||0, l.debit||0, l.dept||'', l.project_id||'']);
+          }
+          await dbRun(`UPDATE journal_entries SET reversed_by=? WHERE id=?`, [reversal_no, entry_id]);
+        });
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'REVERSE_JOURNAL', module: 'Finance', recordId: entry_id, newValue: { reversal_no } });
+        return ok({ reversed: true, reversal_no });
+      }
+
+      // ── FIN-003: month-end close ─────────────────────────────────────────
+      case 'open_close_period': {
+        const { period } = body;
+        if (!period) return err('period (YYYY-MM) required', 400);
+        const existing = await queryOne(`SELECT id FROM month_end_close WHERE period=?`, [period]);
+        if (existing) return err('Close already started for this period', 409);
+        await run(`INSERT INTO month_end_close (id,period,status,checklist) VALUES (?,?,'open',?)`,
+          [uuid(), period, JSON.stringify(DEFAULT_CLOSE_CHECKLIST)]);
+        return ok({ period, status:'open' }, 201);
+      }
+
+      case 'update_close_item': {
+        const { period, key, done } = body;
+        const row = await queryOne(`SELECT * FROM month_end_close WHERE period=?`, [period]);
+        if (!row) return err('Close not started for this period', 404);
+        if (row.status === 'closed') return err('Period already closed', 409);
+        const checklist = JSON.parse(row.checklist || '[]').map(i =>
+          i.key === key ? { ...i, done: !!done, done_by: auth.user.name, done_at: new Date().toISOString() } : i);
+        await run(`UPDATE month_end_close SET checklist=? WHERE period=?`, [JSON.stringify(checklist), period]);
+        return ok({ updated: true, checklist });
+      }
+
+      case 'finalize_close': {
+        if (!['cfo','md','admin'].includes(auth.user.role)) return err('FIN-003: month-end close requires CFO (or MD) digital sign-off', 403);
+        const { period, signature_key } = body;
+        const row = await queryOne(`SELECT * FROM month_end_close WHERE period=?`, [period]);
+        if (!row) return err('Close not started for this period', 404);
+        if (row.status === 'closed') return err('Period already closed', 409);
+        const checklist = JSON.parse(row.checklist || '[]');
+        if (!checklist.every(i => i.done)) return err('All checklist items must be complete before closing', 400);
+        await run(`UPDATE month_end_close SET status='closed', cfo_sig=?, closed_by=?, closed_at=datetime('now') WHERE period=?`,
+          [signature_key||`QSL-DS-${auth.user.role}-${Date.now()}`, auth.user.employee_id, period]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'FINALIZE_MONTH_END', module: 'Finance', recordId: period });
+        return ok({ closed: true, period });
       }
 
       // ── FIN-006: 3-way match a supplier invoice (LPO ↔ GRN ↔ invoice) ────
