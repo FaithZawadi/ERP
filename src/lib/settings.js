@@ -28,7 +28,7 @@ const DEFAULTS = {
   'branding.primary_color': '#1B3A5C',
   'branding.accent_color':  '#C8960C',
   'branding.font_family':   'Inter',
-  'branding.logo_url':      '',
+  'branding.logo_url':      '/logo.svg',
   // Finance
   'finance.vat_rate':            '0.16',
   'finance.imprest_retire_days': '14',

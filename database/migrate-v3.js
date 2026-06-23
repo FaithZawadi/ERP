@@ -569,6 +569,7 @@ async function migrate() {
     ['company.email', 'info@qalibrated.co.ke', 'company'],
     // Branding & theme
     ['branding.company_display_name', 'QSL ERP', 'branding'],
+    ['branding.logo_url', '/logo.svg', 'branding'],
     ['branding.primary_color', '#1B3A5C', 'branding'],
     ['branding.accent_color', '#C8960C', 'branding'],
     ['branding.font_family', 'Inter', 'branding'],
