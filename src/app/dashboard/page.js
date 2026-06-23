@@ -494,6 +494,11 @@ function Finance({ api }) {
   const [plDept,setPlDept]=useState([]);
   const [closePeriod,setClosePeriod]=useState('2026-06');
   const [jForm,setJForm]=useState({date:new Date().toISOString().split('T')[0],description:'',auto_reverse:false,reversal_date:'',lines:[{account_id:'',debit:'',credit:'',dept:''},{account_id:'',debit:'',credit:'',dept:''}]});
+  // Budgeting — FIN-019/020/021
+  const [budgetData,setBudgetData]=useState({budgets:[],targets:[]});
+  const [budgetYear,setBudgetYear]=useState('2026');
+  const [bForm,setBForm]=useState({department:'',cost_centre:'',annual_amount:''});
+  const [tForm,setTForm]=useState({scope:'',annual_target:''});
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -510,6 +515,7 @@ function Finance({ api }) {
     if(t==='payauth'){ const r=await api.get('/api/finance?section=payment_authority'); if(r?.success)setAuthMatrix(r.data); }
     if(t==='journals'){ const [j,a]=await Promise.all([api.get('/api/finance?section=journals'),api.get('/api/finance?section=accounts')]); if(j?.success)setJournals(j.data); if(a?.success)setAccounts(a.data); }
     if(t==='monthend'){ const [m,p]=await Promise.all([api.get(`/api/finance?section=month_end&period=${closePeriod}`),api.get(`/api/finance?section=pl_department&period=${closePeriod}`)]); if(m?.success)setMonthEnd(m.data); if(p?.success)setPlDept(p.data); }
+    if(t==='budgets'){ const r=await api.get(`/api/finance?section=budget_dashboard&year=${budgetYear}`); if(r?.success)setBudgetData(r.data); }
     setLoading(false);
   };
 
@@ -576,7 +582,12 @@ function Finance({ api }) {
   const toggleCloseItem = async (key,done) => { const r=await api.post('/api/finance',{action:'update_close_item',period:closePeriod,key,done}); if(r?.success)reloadMonthEnd(closePeriod); else setMsg({type:'error',text:r?.error}); };
   const finalizeClose = async () => { const r=await api.post('/api/finance',{action:'finalize_close',period:closePeriod,signature_key:`QSL-DS-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:`${closePeriod} closed & locked`});reloadMonthEnd(closePeriod);} else setMsg({type:'error',text:r?.error}); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
+  // ── Budgeting handlers — FIN-019/020 ──
+  const reloadBudgets = async (y) => { setBudgetYear(y); const r=await api.get(`/api/finance?section=budget_dashboard&year=${y}`); if(r?.success)setBudgetData(r.data); };
+  const createBudget = async () => { if(!bForm.department||!bForm.annual_amount)return; const r=await api.post('/api/finance',{action:'create_budget',fiscal_year:budgetYear,department:bForm.department,cost_centre:bForm.cost_centre,annual_amount:parseFloat(bForm.annual_amount)}); if(r?.success){setMsg({type:'success',text:'Budget saved'});setModal(null);setBForm({department:'',cost_centre:'',annual_amount:''});reloadBudgets(budgetYear);} else setMsg({type:'error',text:r?.error}); };
+  const createTarget = async () => { if(!tForm.scope||!tForm.annual_target)return; const r=await api.post('/api/finance',{action:'create_revenue_target',fiscal_year:budgetYear,scope:tForm.scope,annual_target:parseFloat(tForm.annual_target)}); if(r?.success){setMsg({type:'success',text:'Revenue target saved'});setModal(null);setTForm({scope:'',annual_target:''});reloadBudgets(budgetYear);} else setMsg({type:'error',text:r?.error}); };
+
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -738,6 +749,43 @@ function Finance({ api }) {
         </div>
       </>)}
 
+      {!loading&&tab==='budgets'&&(<>
+        <Alert type="info"><strong>FIN-019/020/021:</strong> annual department budgets and revenue targets vs actuals from posted journals. Budgets flag <strong>amber at 80%</strong> and <strong>red at 100%</strong> consumed.</Alert>
+        <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:14}}>
+          <label style={{fontSize:12,fontWeight:600,color:T.dgrey}}>Fiscal Year:</label>
+          <select value={budgetYear} onChange={e=>reloadBudgets(e.target.value)} style={{padding:'7px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:13}}>
+            {['2025','2026','2027'].map(y=><option key={y} value={y}>{y}</option>)}
+          </select>
+        </div>
+
+        <SectionHeader title="Department Budgets vs Actual" sub="Actual expense from posted journals" action={<Btn size="sm" onClick={()=>setModal('budget')}>+ Budget</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['Department','Cost Centre','Annual Budget','Actual','Consumed','Variance','Status']}
+            empty="No budgets for this year — add one above."
+            rows={budgetData.budgets.map(b=>[
+              <strong>{b.department}</strong>, b.cost_centre||'—', fmt.kes(b.annual_amount), fmt.kes(b.actual),
+              <div style={{minWidth:90}}>
+                <div style={{height:6,background:T.lgrey,borderRadius:3,overflow:'hidden'}}><div style={{width:`${Math.min(100,b.consumed_pct)}%`,height:'100%',background:b.status==='over'?T.red:b.status==='warning'?T.amber:T.green}}/></div>
+                <span style={{fontSize:10,color:T.mgrey}}>{b.consumed_pct}%</span>
+              </div>,
+              <span style={{color:b.variance<0?T.red:T.dgrey}}>{fmt.kes(b.variance)}</span>,
+              <Badge variant={b.status==='over'?'red':b.status==='warning'?'amber':'green'}>{b.status==='over'?'OVER 100%':b.status==='warning'?'≥80%':'OK'}</Badge>,
+            ])}/>
+        </Card>
+
+        <SectionHeader title="Revenue vs Target" sub="Actual income from posted journals" action={<Btn size="sm" onClick={()=>setModal('target')}>+ Target</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Scope','Annual Target','Actual','Achieved','Variance','Status']}
+            empty="No revenue targets for this year."
+            rows={budgetData.targets.map(t=>[
+              <strong>{t.scope}</strong>, fmt.kes(t.annual_target), fmt.kes(t.actual),
+              <span style={{fontWeight:700,color:t.status==='met'?T.green:t.status==='on_track'?T.amber:T.red}}>{t.achieved_pct}%</span>,
+              <span style={{color:t.variance<0?T.red:T.green}}>{fmt.kes(t.variance)}</span>,
+              <Badge variant={t.status==='met'?'green':t.status==='on_track'?'amber':'red'}>{t.status.replace('_',' ')}</Badge>,
+            ])}/>
+        </Card>
+      </>)}
+
       {!loading&&tab==='payments'&&(<>
         <Alert type="info"><strong>Accounts Payable:</strong> supplier invoices must clear a 3-way match (LPO ↔ GRN ↔ invoice) before a payment voucher can be raised (FIN-006). Voucher amount sets the required approval authority (FIN-007); approved vouchers are paid in batches signed FM → CFO → MD (FIN-008).</Alert>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:16}}>
@@ -871,6 +919,27 @@ function Finance({ api }) {
             {jForm.auto_reverse&&<Input label="Reversal date" type="date" value={jForm.reversal_date} onChange={v=>setJForm({...jForm,reversal_date:v})}/>}
           </div>
           <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:10}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createJournal} disabled={!jForm.description}>Create Draft</Btn></div>
+        </Modal>
+      )}
+
+      {modal==='budget'&&(
+        <Modal title={`Department Budget — FY ${budgetYear} (FIN-020)`} onClose={()=>setModal(null)} width={500}>
+          <Alert type="info">Even monthly phasing is applied automatically. Saving again for the same department/cost-centre updates it.</Alert>
+          <Select label="Department" value={bForm.department} onChange={v=>setBForm({...bForm,department:v})} required
+            options={[{value:'',label:'Select department…'},...[...new Set(employees.map(e=>e.department).filter(Boolean))].map(d=>({value:d,label:d}))]}/>
+          <Input label="Cost Centre (optional)" value={bForm.cost_centre} onChange={v=>setBForm({...bForm,cost_centre:v})} placeholder="e.g. Calibration Lab"/>
+          <Input label="Annual Budget (Kshs)" type="number" value={bForm.annual_amount} onChange={v=>setBForm({...bForm,annual_amount:v})} required placeholder="0"/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createBudget} disabled={!bForm.department||!bForm.annual_amount}>Save Budget</Btn></div>
+        </Modal>
+      )}
+
+      {modal==='target'&&(
+        <Modal title={`Revenue Target — FY ${budgetYear} (FIN-019)`} onClose={()=>setModal(null)} width={500}>
+          <Alert type="info">Use a department name, or "Company" for the company-wide target. Actual is measured from posted income journals.</Alert>
+          <Select label="Scope" value={tForm.scope} onChange={v=>setTForm({...tForm,scope:v})} required
+            options={[{value:'',label:'Select scope…'},{value:'Company',label:'Company-wide'},...[...new Set(employees.map(e=>e.department).filter(Boolean))].map(d=>({value:d,label:d}))]}/>
+          <Input label="Annual Target (Kshs)" type="number" value={tForm.annual_target} onChange={v=>setTForm({...tForm,annual_target:v})} required placeholder="0"/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createTarget} disabled={!tForm.scope||!tForm.annual_target}>Save Target</Btn></div>
         </Modal>
       )}
     </div>

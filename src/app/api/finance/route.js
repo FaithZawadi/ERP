@@ -214,6 +214,52 @@ export async function GET(req) {
         return ok(data);
       }
 
+      // ── Budget dashboard: dept budgets vs actuals + revenue vs targets,
+      //    with 80%/100% variance alerts (FIN-019/020/021) ──────────────────
+      case 'budget_dashboard': {
+        const year = searchParams.get('year') || String(new Date().getFullYear());
+        const statusOf = (pct) => pct >= 100 ? 'over' : pct >= 80 ? 'warning' : 'ok';
+
+        // Actual expense by department from posted journals, this fiscal year.
+        const expRows = await query(
+          `SELECT COALESCE(NULLIF(jl.dept,''),'(unassigned)') as dept,
+                  SUM(jl.debit - jl.credit) as actual
+           FROM journal_lines jl
+           JOIN journal_entries je ON jl.entry_id=je.id AND je.status='posted' AND je.date LIKE ?
+           JOIN chart_of_accounts coa ON jl.account_id=coa.id AND coa.category='Expense'
+           GROUP BY COALESCE(NULLIF(jl.dept,''),'(unassigned)')`, [`${year}%`]
+        );
+        const expByDept = Object.fromEntries(expRows.map(r => [r.dept, r.actual || 0]));
+
+        // Actual income by department (and company-wide) from posted journals.
+        const incRows = await query(
+          `SELECT COALESCE(NULLIF(jl.dept,''),'(unassigned)') as dept,
+                  SUM(jl.credit - jl.debit) as actual
+           FROM journal_lines jl
+           JOIN journal_entries je ON jl.entry_id=je.id AND je.status='posted' AND je.date LIKE ?
+           JOIN chart_of_accounts coa ON jl.account_id=coa.id AND coa.category='Income'
+           GROUP BY COALESCE(NULLIF(jl.dept,''),'(unassigned)')`, [`${year}%`]
+        );
+        const incByDept = Object.fromEntries(incRows.map(r => [r.dept, r.actual || 0]));
+        const companyIncome = incRows.reduce((s,r)=>s+(r.actual||0),0);
+
+        const budgetRows = await query(`SELECT * FROM budgets WHERE fiscal_year=? ORDER BY department, cost_centre`, [year]);
+        const budgets = budgetRows.map(b => {
+          const actual = expByDept[b.department] || 0;
+          const pct = b.annual_amount ? Math.round(actual / b.annual_amount * 1000) / 10 : 0;
+          return { ...b, actual, consumed_pct: pct, variance: b.annual_amount - actual, status: statusOf(pct) };
+        });
+
+        const targetRows = await query(`SELECT * FROM revenue_targets WHERE fiscal_year=? ORDER BY scope`, [year]);
+        const targets = targetRows.map(t => {
+          const actual = t.scope === 'Company' ? companyIncome : (incByDept[t.scope] || 0);
+          const pct = t.annual_target ? Math.round(actual / t.annual_target * 1000) / 10 : 0;
+          return { ...t, actual, achieved_pct: pct, variance: actual - t.annual_target, status: pct >= 100 ? 'met' : pct >= 80 ? 'on_track' : 'behind' };
+        });
+
+        return ok({ year, budgets, targets });
+      }
+
       // ── The payment authority matrix (live from settings) — FIN-007 ──────
       case 'payment_authority': {
         const L = await paymentLimits();
@@ -550,6 +596,43 @@ export async function POST(req) {
           [signature_key||`QSL-DS-${auth.user.role}-${Date.now()}`, auth.user.employee_id, period]);
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'FINALIZE_MONTH_END', module: 'Finance', recordId: period });
         return ok({ closed: true, period });
+      }
+
+      // ── FIN-020: annual department/cost-centre budget with monthly phasing ─
+      case 'create_budget': {
+        const { fiscal_year, department, cost_centre, category, annual_amount, phasing } = body;
+        if (!fiscal_year || !department || !annual_amount) return err('fiscal_year, department and annual_amount required', 400);
+        // Even phasing across 12 months if none supplied.
+        const phase = Array.isArray(phasing) && phasing.length === 12
+          ? phasing : Array(12).fill(Math.round(annual_amount / 12));
+        const existing = await queryOne(`SELECT id FROM budgets WHERE fiscal_year=? AND department=? AND COALESCE(cost_centre,'')=COALESCE(?,'')`, [fiscal_year, department, cost_centre||'']);
+        if (existing) {
+          await run(`UPDATE budgets SET category=?, annual_amount=?, phasing=? WHERE id=?`, [category||null, annual_amount, JSON.stringify(phase), existing.id]);
+          return ok({ id: existing.id, updated: true });
+        }
+        const id = uuid();
+        await run(`INSERT INTO budgets (id,fiscal_year,department,cost_centre,category,annual_amount,phasing,created_by) VALUES (?,?,?,?,?,?,?,?)`,
+          [id, fiscal_year, department, cost_centre||null, category||null, annual_amount, JSON.stringify(phase), auth.user.employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_BUDGET', module: 'Finance', recordId: id, newValue: { department, annual_amount } });
+        return ok({ id }, 201);
+      }
+
+      // ── FIN-019: revenue / KPI target by department or company-wide ──────
+      case 'create_revenue_target': {
+        const { fiscal_year, scope, annual_target, phasing } = body;
+        if (!fiscal_year || !scope || !annual_target) return err('fiscal_year, scope and annual_target required', 400);
+        const phase = Array.isArray(phasing) && phasing.length === 12
+          ? phasing : Array(12).fill(Math.round(annual_target / 12));
+        const existing = await queryOne(`SELECT id FROM revenue_targets WHERE fiscal_year=? AND scope=?`, [fiscal_year, scope]);
+        if (existing) {
+          await run(`UPDATE revenue_targets SET annual_target=?, phasing=? WHERE id=?`, [annual_target, JSON.stringify(phase), existing.id]);
+          return ok({ id: existing.id, updated: true });
+        }
+        const id = uuid();
+        await run(`INSERT INTO revenue_targets (id,fiscal_year,scope,annual_target,phasing,created_by) VALUES (?,?,?,?,?,?)`,
+          [id, fiscal_year, scope, annual_target, JSON.stringify(phase), auth.user.employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_REVENUE_TARGET', module: 'Finance', recordId: id, newValue: { scope, annual_target } });
+        return ok({ id }, 201);
       }
 
       // ── FIN-006: 3-way match a supplier invoice (LPO ↔ GRN ↔ invoice) ────

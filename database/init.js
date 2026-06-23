@@ -364,6 +364,35 @@ CREATE TABLE IF NOT EXISTS payment_batches (
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
+-- Annual department/cost-centre budgets with monthly phasing (FIN-020).
+-- Actuals are derived from posted journal lines (category Expense) by dept;
+-- variance & 80%/100% alerts are computed against annual_amount (FIN-021).
+CREATE TABLE IF NOT EXISTS budgets (
+  id            TEXT PRIMARY KEY,
+  fiscal_year   TEXT NOT NULL,           -- e.g. '2026'
+  department    TEXT NOT NULL,
+  cost_centre   TEXT,
+  category      TEXT,                     -- optional expense-category label
+  annual_amount REAL NOT NULL,
+  phasing       TEXT,                     -- JSON: 12 monthly amounts
+  created_by    TEXT REFERENCES employees(id),
+  created_at    TEXT DEFAULT (datetime('now')),
+  UNIQUE(fiscal_year, department, cost_centre)
+);
+
+-- Revenue vs KPI target tracking (FIN-019): annual target + monthly phasing per
+-- department (or 'Company'); actual revenue is posted Income journals.
+CREATE TABLE IF NOT EXISTS revenue_targets (
+  id            TEXT PRIMARY KEY,
+  fiscal_year   TEXT NOT NULL,
+  scope         TEXT NOT NULL,            -- department name, or 'Company'
+  annual_target REAL NOT NULL,
+  phasing       TEXT,                      -- JSON: 12 monthly amounts
+  created_by    TEXT REFERENCES employees(id),
+  created_at    TEXT DEFAULT (datetime('now')),
+  UNIQUE(fiscal_year, scope)
+);
+
 -- Month-end close (FIN-003): a per-period checklist (reconciliations,
 -- prepayments, accruals, depreciation run). Closing requires every item done
 -- plus the CFO's digital sign-off, after which the period is locked — posting
