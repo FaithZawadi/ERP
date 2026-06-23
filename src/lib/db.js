@@ -47,6 +47,23 @@ async function getDB_sqlite() {
     _SQL = await initSqlJs();
   }
 
+  // Ensure the parent directory exists — DB_PATH may point at a mounted disk
+  // (e.g. /var/data on a hosted deploy) that isn't created yet.
+  try { fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); } catch {}
+
+  // First boot: if a seed template shipped with the deploy, bootstrap from it so
+  // the app comes up fully populated (demo data, settings, module flags). This
+  // keeps startup self-contained — no shell step needed in the container command.
+  if (!fs.existsSync(DB_PATH)) {
+    const templatePath = path.join(process.cwd(), 'database', 'seed-template.db');
+    if (fs.existsSync(templatePath)) {
+      try {
+        fs.copyFileSync(templatePath, DB_PATH);
+        console.log('[DB] bootstrapped from seed-template.db at', DB_PATH);
+      } catch (e) { console.error('[DB] template copy failed:', e.message); }
+    }
+  }
+
   if (fs.existsSync(DB_PATH)) {
     const buf = fs.readFileSync(DB_PATH);
     _db = new _SQL.Database(buf);

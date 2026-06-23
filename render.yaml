@@ -19,11 +19,10 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    # Override the Dockerfile CMD: bootstrap the DB from the seed template on
-    # first boot (does NOT re-run init/seed, so existing data is preserved when
-    # a persistent disk is attached), then start the server.
-    dockerCommand: >-
-      sh -c 'mkdir -p "$UPLOAD_DIR" "$(dirname "$SQLITE_PATH")" && { [ -f "$SQLITE_PATH" ] || cp database/seed-template.db "$SQLITE_PATH"; } && exec npm start'
+    # Just start the server. The DB bootstrap (copy seed-template.db to
+    # SQLITE_PATH on first boot, creating the dir) is handled in src/lib/db.js,
+    # and upload dirs are created on demand — so no shell step is needed here.
+    dockerCommand: npm start
     healthCheckPath: /api/branding
     envVars:
       - key: NODE_ENV
