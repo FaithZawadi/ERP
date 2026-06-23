@@ -27,17 +27,20 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Writable, owned by the non-root container user. Ephemeral on the free
+      # plan (resets on restart). For persistence, see the disk note below.
       - key: SQLITE_PATH
-        value: /var/data/qsl_erp.db
+        value: /app/data/qsl_erp.db
       - key: UPLOAD_DIR
-        value: /var/data/uploads
+        value: /app/data/uploads
       - key: JWT_SECRET
         generateValue: true   # Render generates a strong secret automatically
 
     # ── Persistence (recommended for shared user testing) ──────────────────
     # Render disks require a paid instance type. To keep data across restarts:
     #   1. change `plan: free` above to `plan: starter`
-    #   2. uncomment the block below
+    #   2. set SQLITE_PATH=/var/data/qsl_erp.db and UPLOAD_DIR=/var/data/uploads
+    #   3. uncomment the block below (the mounted disk is writable by the service user)
     # disk:
     #   name: qsl-data
     #   mountPath: /var/data

@@ -1518,6 +1518,13 @@ async function main() {
   }
 }
 
-main();
+// Only run the initialiser when this file is executed directly
+// (e.g. `node database/init.js` / `npm run db:init`). When it's merely
+// require()'d for its SCHEMA (as db.js does), main() must NOT run — otherwise
+// importing the schema would try to create/write a database file as a side
+// effect, which fails on a read-only or unwritable path.
+if (require.main === module) {
+  main();
+}
 
 module.exports = { SCHEMA };
