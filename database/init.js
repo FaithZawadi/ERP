@@ -316,6 +316,49 @@ CREATE TABLE IF NOT EXISTS payment_vouchers (
   module_ref      TEXT,
   withholding_tax REAL DEFAULT 0,
   vat_amount      REAL DEFAULT 0,
+  supplier_invoice_id TEXT,    -- links a voucher to its 3-way-matched supplier invoice (FIN-006)
+  batch_id        TEXT,        -- payment batch this voucher belongs to (FIN-008)
+  required_level  TEXT,        -- authority level required to approve, by amount (FIN-007)
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- ACCOUNTS PAYABLE — 3-way match & batch payments (FIN-006/007/008)
+-- ═══════════════════════════════════════════════════════════════
+
+-- Supplier invoices undergo a 3-way match (LPO ordered ↔ GRN received ↔
+-- invoice billed) before any payment is processed. A variance, or a missing/
+-- incomplete GRN, flags the invoice as an exception requiring CFO approval.
+CREATE TABLE IF NOT EXISTS supplier_invoices (
+  id              TEXT PRIMARY KEY,
+  invoice_no      TEXT NOT NULL,
+  supplier_id     TEXT REFERENCES suppliers(id),
+  lpo_id          TEXT REFERENCES lpos(id),
+  grn_id          TEXT REFERENCES grns(id),
+  invoice_amount  REAL NOT NULL,
+  lpo_amount      REAL,                       -- snapshot of LPO grand_total at match time
+  invoice_date    TEXT,
+  match_status    TEXT,                        -- matched | variance | no_grn
+  variance_amount REAL DEFAULT 0,
+  status          TEXT DEFAULT 'pending',      -- matched | exception | approved | voucher_created
+  exception_reason TEXT,
+  approved_by     TEXT REFERENCES employees(id),  -- CFO who cleared an exception
+  approved_at     TEXT,
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Batch payments: the Finance Manager prepares a batch, CFO reviews, MD
+-- approves — each step applies a digital signature (mirrors the payroll chain).
+CREATE TABLE IF NOT EXISTS payment_batches (
+  id              TEXT PRIMARY KEY,
+  batch_no        TEXT UNIQUE NOT NULL,
+  prepared_by     TEXT REFERENCES employees(id),
+  total_amount    REAL DEFAULT 0,
+  voucher_count   INTEGER DEFAULT 0,
+  status          TEXT DEFAULT 'draft',        -- draft | fm_signed | cfo_signed | approved
+  fm_sig          TEXT, fm_signed_at   TEXT,
+  cfo_sig         TEXT, cfo_signed_at  TEXT,
+  md_sig          TEXT, md_signed_at   TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
 );
 

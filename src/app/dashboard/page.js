@@ -479,12 +479,29 @@ function Finance({ api }) {
   const [msg,setMsg]=useState(null);
   const [payStep,setPayStep]=useState('review');
   const [signing,setSigning]=useState(false);
+  // Payments (AP) — FIN-006/007/008
+  const [payables,setPayables]=useState({stats:{},invoices:[]});
+  const [vouchers,setVouchers]=useState([]);
+  const [batches,setBatches]=useState([]);
+  const [authMatrix,setAuthMatrix]=useState([]);
+  const [lpos,setLpos]=useState([]);
+  const [matchForm,setMatchForm]=useState({lpo_id:'',invoice_no:'',invoice_amount:''});
+  const [adhoc,setAdhoc]=useState({payee:'',amount:'',purpose:''});
+  const [batchSel,setBatchSel]=useState([]);
 
   const load = async (t=tab) => {
     setLoading(true);
     if(t==='imprest'){ const r=await api.get('/api/finance?section=imprest'); if(r?.success) setImprest(r.data); }
     if(t==='payroll'){ const r=await api.get('/api/finance?section=payroll&period=2026-06'); if(r?.success){setPayroll(r.data.run);setPayrollEntries(r.data.entries||[]);} }
     if(t==='gl'){ const r=await api.get('/api/finance?section=accounts'); if(r?.success) setAccounts(r.data); }
+    if(t==='payments'){
+      const [p,v,b,l]=await Promise.all([
+        api.get('/api/finance?section=payables'), api.get('/api/finance?section=vouchers'),
+        api.get('/api/finance?section=batches'),  api.get('/api/procurement?section=lpos')]);
+      if(p?.success)setPayables(p.data); if(v?.success)setVouchers(v.data);
+      if(b?.success)setBatches(b.data); if(l?.success)setLpos(l.data);
+    }
+    if(t==='payauth'){ const r=await api.get('/api/finance?section=payment_authority'); if(r?.success)setAuthMatrix(r.data); }
     setLoading(false);
   };
 
@@ -518,7 +535,22 @@ function Finance({ api }) {
     load('imprest');
   };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'General Ledger'},{id:'payauth',label:'Payment Authority'}];
+  // ── Payments (AP) handlers — FIN-006/007/008 ──
+  const matchInvoice = async () => {
+    if(!matchForm.lpo_id||!matchForm.invoice_no||!matchForm.invoice_amount) return;
+    const r=await api.post('/api/finance',{action:'match_invoice',lpo_id:matchForm.lpo_id,invoice_no:matchForm.invoice_no,invoice_amount:parseFloat(matchForm.invoice_amount)});
+    if(r?.success){ setMsg({type:r.data.status==='exception'?'warning':'success',text:r.data.status==='exception'?`Exception flagged for CFO: ${r.data.exception_reason}`:`3-way match passed ✓`}); setMatchForm({lpo_id:'',invoice_no:'',invoice_amount:''}); setModal(null); load('payments'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+  const approveException = async (id) => { const r=await api.post('/api/finance',{action:'approve_invoice_exception',invoice_id:id}); if(r?.success){setMsg({type:'success',text:'Exception approved — invoice now matched'});load('payments');} else setMsg({type:'error',text:r?.error}); };
+  const raiseVoucher = async (inv) => { const r=await api.post('/api/finance',{action:'create_voucher',supplier_invoice_id:inv.id}); if(r?.success){setMsg({type:'success',text:`Voucher ${r.data.voucher_no} raised — requires ${r.data.required_level.replace('_',' ').toUpperCase()} approval`});load('payments');} else setMsg({type:'error',text:r?.error}); };
+  const raiseAdhoc = async () => { if(!adhoc.payee||!adhoc.amount||!adhoc.purpose)return; const r=await api.post('/api/finance',{action:'create_voucher',...adhoc,amount:parseFloat(adhoc.amount)}); if(r?.success){setMsg({type:'success',text:`Voucher ${r.data.voucher_no} — requires ${r.data.required_level.replace('_',' ').toUpperCase()} approval`});setAdhoc({payee:'',amount:'',purpose:''});setModal(null);load('payments');} else setMsg({type:'error',text:r?.error}); };
+  const approveVoucher = async (id) => { const r=await api.post('/api/finance',{action:'approve_voucher',voucher_id:id,signature_key:`QSL-DS-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:'Voucher approved & signed'});load('payments');} else setMsg({type:'error',text:r?.error}); };
+  const toggleBatchSel = (id) => setBatchSel(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id]);
+  const createBatch = async () => { if(!batchSel.length){setMsg({type:'error',text:'Select approved vouchers to batch'});return;} const r=await api.post('/api/finance',{action:'create_batch',voucher_ids:batchSel}); if(r?.success){setMsg({type:'success',text:`Batch ${r.data.batch_no} prepared (${r.data.voucher_count} vouchers)`});setBatchSel([]);load('payments');} else setMsg({type:'error',text:r?.error}); };
+  const signBatch = async (id,role) => { const r=await api.post('/api/finance',{action:'sign_batch',batch_id:id,signer_role:role,signature_key:`QSL-DS-${role}-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:`Batch ${r.data.status}`});load('payments');} else setMsg({type:'error',text:r?.error}); };
+
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'General Ledger'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -631,16 +663,70 @@ function Finance({ api }) {
         </>
       )}
 
+      {!loading&&tab==='payments'&&(<>
+        <Alert type="info"><strong>Accounts Payable:</strong> supplier invoices must clear a 3-way match (LPO ↔ GRN ↔ invoice) before a payment voucher can be raised (FIN-006). Voucher amount sets the required approval authority (FIN-007); approved vouchers are paid in batches signed FM → CFO → MD (FIN-008).</Alert>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:16}}>
+          <Stat label="Supplier Invoices" value={payables.stats?.total||0} icon="🧾"/>
+          <Stat label="Match Exceptions" value={payables.stats?.exceptions||0} icon="⚠️" variant="amber"/>
+          <Stat label="Vouchers" value={vouchers.length} icon="💳"/>
+          <Stat label="Batches" value={batches.length} icon="📦"/>
+        </div>
+
+        <SectionHeader title="Supplier Invoices — 3-Way Match" action={<div style={{display:'flex',gap:8}}><Btn size="sm" onClick={()=>setModal('match')}>+ Match Invoice</Btn><Btn size="sm" variant="ghost" onClick={()=>setModal('adhoc')}>+ Ad-hoc Voucher</Btn></div>}/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['Invoice','Supplier','Invoice Amt','LPO Amt','Match','Status','']}
+            empty="No supplier invoices yet — match one against an LPO above."
+            rows={payables.invoices.map(i=>[
+              <span style={{fontFamily:'monospace',fontSize:11}}>{i.invoice_no}</span>, i.supplier_name||'—',
+              fmt.kes(i.invoice_amount), fmt.kes(i.lpo_amount),
+              <Badge variant={i.match_status==='matched'?'green':'amber'}>{i.match_status}</Badge>,
+              <Badge variant={i.status==='exception'?'red':i.status==='matched'?'green':'navy'}>{i.status}</Badge>,
+              i.status==='exception'?<Btn size="sm" variant="ghost" onClick={()=>approveException(i.id)}>CFO Approve</Btn>
+                : i.status==='matched'?<Btn size="sm" onClick={()=>raiseVoucher(i)}>Raise Voucher</Btn> : '✓',
+            ])}/>
+        </Card>
+
+        <SectionHeader title="Payment Vouchers" sub="Approval enforced by amount (FIN-007). Select approved vouchers to batch."
+          action={<Btn size="sm" disabled={!batchSel.length} onClick={createBatch}>Batch {batchSel.length||''} →</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['','Voucher','Payee','Amount','Requires','Status','']}
+            empty="No vouchers yet."
+            rows={vouchers.map(v=>[
+              v.status==='approved'&&!v.batch_id?<input type="checkbox" checked={batchSel.includes(v.id)} onChange={()=>toggleBatchSel(v.id)}/>:'',
+              <span style={{fontFamily:'monospace',fontSize:11}}>{v.voucher_no}</span>, v.payee, fmt.kes(v.amount),
+              <Badge variant="navy">{(v.required_level||v.auth_level||'').replace('_',' ')}</Badge>,
+              <Badge variant={v.status==='paid'?'green':v.status==='approved'?'blue':'amber'}>{v.status}</Badge>,
+              v.status==='pending_approval'?<Btn size="sm" onClick={()=>approveVoucher(v.id)}>Approve</Btn>:v.status==='approved'?'✓ signed':'—',
+            ])}/>
+        </Card>
+
+        <SectionHeader title="Payment Batches — FM → CFO → MD"/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Batch','Vouchers','Total','Status','Sign']}
+            empty="No batches yet."
+            rows={batches.map(b=>[
+              <span style={{fontFamily:'monospace',fontSize:11}}>{b.batch_no}</span>, b.voucher_count, fmt.kes(b.total_amount),
+              <Badge variant={b.status==='approved'?'green':b.status==='draft'?'amber':'blue'}>{b.status}</Badge>,
+              b.status==='approved'?'✓ paid':(
+                <div style={{display:'flex',gap:4}}>
+                  <Btn size="sm" variant={b.fm_sig?'ghost':'primary'} disabled={!!b.fm_sig} onClick={()=>signBatch(b.id,'fm')}>FM</Btn>
+                  <Btn size="sm" variant={b.cfo_sig?'ghost':'primary'} disabled={!b.fm_sig||!!b.cfo_sig} onClick={()=>signBatch(b.id,'cfo')}>CFO</Btn>
+                  <Btn size="sm" variant={b.md_sig?'ghost':'primary'} disabled={!b.cfo_sig||!!b.md_sig} onClick={()=>signBatch(b.id,'md')}>MD</Btn>
+                </div>
+              ),
+            ])}/>
+        </Card>
+      </>)}
+
       {!loading&&tab==='payauth'&&(
         <>
-          <Alert type="info"><strong>QSL-FIN-007 — Payment Authority Matrix:</strong> System enforces these limits. Any override requires escalation and digital signature audit trail.</Alert>
+          <Alert type="info"><strong>QSL-FIN-007 — Payment Authority Matrix:</strong> the system enforces these limits on every payment voucher. A payment above a role's limit is refused with an escalation message — no overrides. Edit the limits in Administration → System Settings → Finance.</Alert>
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Authorisation Level','Payment Limit','Approver Required','Method']}
-              rows={payAuthMatrix.map(([level,limit,approver,method])=>[
-                <strong style={{color:T.navy}}>{level}</strong>,
-                <span style={{fontWeight:700,color:T.gold,fontFamily:'monospace'}}>{limit}</span>,
-                approver,
-                <Badge variant={approver==='Board'?'red':approver==='MD'?'amber':'blue'}>{method}</Badge>,
+            <DataTable headers={['Authorisation Level','Payment Limit (≤)','Role']}
+              rows={authMatrix.map(m=>[
+                <strong style={{color:T.navy}}>{m.level}</strong>,
+                <span style={{fontWeight:700,color:'var(--accent, #C8960C)',fontFamily:'monospace'}}>{m.limit==null?'No limit (top authority)':fmt.kes(m.limit)}</span>,
+                <Badge variant={m.role==='md'?'red':m.role==='cfo'?'amber':'blue'}>{m.role.replace('_',' ')}</Badge>,
               ])}
             />
           </Card>
@@ -658,6 +744,27 @@ function Finance({ api }) {
             <Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn>
             <Btn onClick={createImprest} disabled={!form.employee_id||!form.amount||!form.purpose}>Submit Request</Btn>
           </div>
+        </Modal>
+      )}
+
+      {modal==='match'&&(
+        <Modal title="3-Way Match — Supplier Invoice (FIN-006)" onClose={()=>setModal(null)} width={540}>
+          <Alert type="info">The system matches the invoice against the LPO (ordered) and requires a completed GRN (received). A variance or missing GRN is flagged for CFO approval.</Alert>
+          <Select label="Local Purchase Order" value={matchForm.lpo_id} onChange={v=>setMatchForm({...matchForm,lpo_id:v})} required
+            options={[{value:'',label:'Select LPO…'},...lpos.map(l=>({value:l.id,label:`${l.lpo_no} — ${fmt.kes(l.grand_total)}`}))]}/>
+          <Input label="Supplier Invoice No." value={matchForm.invoice_no} onChange={v=>setMatchForm({...matchForm,invoice_no:v})} required placeholder="e.g. SI-2026-001"/>
+          <Input label="Invoice Amount (Kshs)" type="number" value={matchForm.invoice_amount} onChange={v=>setMatchForm({...matchForm,invoice_amount:v})} required placeholder="0"/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={matchInvoice} disabled={!matchForm.lpo_id||!matchForm.invoice_no||!matchForm.invoice_amount}>Run Match</Btn></div>
+        </Modal>
+      )}
+
+      {modal==='adhoc'&&(
+        <Modal title="Ad-hoc Payment Voucher" onClose={()=>setModal(null)} width={520}>
+          <Alert type="info">The amount determines the approval authority required (FIN-007).</Alert>
+          <Input label="Payee" value={adhoc.payee} onChange={v=>setAdhoc({...adhoc,payee:v})} required/>
+          <Input label="Amount (Kshs)" type="number" value={adhoc.amount} onChange={v=>setAdhoc({...adhoc,amount:v})} required placeholder="0"/>
+          <Input label="Purpose" value={adhoc.purpose} onChange={v=>setAdhoc({...adhoc,purpose:v})} required/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={raiseAdhoc} disabled={!adhoc.payee||!adhoc.amount||!adhoc.purpose}>Raise Voucher</Btn></div>
         </Modal>
       )}
     </div>

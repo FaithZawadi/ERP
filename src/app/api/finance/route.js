@@ -6,6 +6,37 @@ import { requireAuth, ok, err, logAudit } from '../../../lib/auth';
 import { query, queryOne, run, transaction } from '../../../lib/db';
 import { calculatePayslip, calculateVAT } from '../../../lib/tax';
 
+// ── PAYMENT AUTHORITY MATRIX (FIN-007) ────────────────────────────────────────
+// Approval rank by role. A voucher's amount sets the MINIMUM rank required to
+// approve it (thresholds configurable via System Settings, finance.pay_limit_*).
+// An approver whose rank is below the requirement is refused — "no overrides
+// without escalation". md/admin sit at the top and can approve anything.
+const AUTH_RANK = {
+  staff:1, store_clerk:1, technician:1, driver:1, fleet_support:1,
+  dept_head:2, hr_manager:2, project_manager:2, store_manager:2, procurement_officer:2, fleet_manager:2,
+  finance_manager:3, fm:3, accountant:3,
+  cfo:4,
+  md:5, admin:5,
+};
+async function paymentLimits() {
+  const s = require('../../../lib/settings');
+  return {
+    staff:     await s.getNum('finance.pay_limit_staff', 5000),
+    dept_head: await s.getNum('finance.pay_limit_dept_head', 20000),
+    fm:        await s.getNum('finance.pay_limit_finance_mgr', 100000),
+    cfo:       await s.getNum('finance.pay_limit_cfo', 500000),
+  };
+}
+// Returns { level, rank } — the authority tier required to approve `amount`.
+async function requiredAuthority(amount) {
+  const L = await paymentLimits();
+  if (amount <= L.staff)     return { level:'staff',     rank:1, limit:L.staff };
+  if (amount <= L.dept_head) return { level:'dept_head', rank:2, limit:L.dept_head };
+  if (amount <= L.fm)        return { level:'finance_manager', rank:3, limit:L.fm };
+  if (amount <= L.cfo)       return { level:'cfo',       rank:4, limit:L.cfo };
+  return { level:'md', rank:5, limit:null };
+}
+
 // ── GET /api/finance?section=imprest|payroll|gl|stats ────────────────────────
 
 export async function GET(req) {
@@ -81,6 +112,57 @@ export async function GET(req) {
           `SELECT * FROM chart_of_accounts WHERE is_active=1 ORDER BY code`
         );
         return ok(accounts);
+      }
+
+      // ── Accounts payable: 3-way-matched supplier invoices (FIN-006) ──────
+      case 'payables': {
+        const rows = await query(
+          `SELECT si.*, s.name as supplier_name, l.grand_total as lpo_grand_total
+           FROM supplier_invoices si
+           LEFT JOIN suppliers s ON si.supplier_id=s.id
+           LEFT JOIN lpos l ON si.lpo_id=l.id
+           ORDER BY si.created_at DESC`
+        );
+        const [stats] = await query(
+          `SELECT COUNT(*) as total,
+                  SUM(CASE WHEN status='exception' THEN 1 ELSE 0 END) as exceptions,
+                  SUM(CASE WHEN status='matched' THEN 1 ELSE 0 END) as matched,
+                  SUM(CASE WHEN status='voucher_created' THEN 1 ELSE 0 END) as paid_path
+           FROM supplier_invoices`
+        );
+        return ok({ stats, invoices: rows });
+      }
+
+      // ── Payment vouchers with their required authority level (FIN-007) ───
+      case 'vouchers': {
+        const rows = await query(
+          `SELECT pv.*, e.first_name||' '||e.last_name as approved_by_name
+           FROM payment_vouchers pv LEFT JOIN employees e ON pv.approved_by=e.id
+           ORDER BY pv.created_at DESC LIMIT ? OFFSET ?`, [limit, (page-1)*limit]
+        );
+        return ok(rows);
+      }
+
+      // ── Payment batches FM→CFO→MD (FIN-008) ──────────────────────────────
+      case 'batches': {
+        const rows = await query(
+          `SELECT b.*, e.first_name||' '||e.last_name as prepared_by_name
+           FROM payment_batches b LEFT JOIN employees e ON b.prepared_by=e.id
+           ORDER BY b.created_at DESC`
+        );
+        return ok(rows);
+      }
+
+      // ── The payment authority matrix (live from settings) — FIN-007 ──────
+      case 'payment_authority': {
+        const L = await paymentLimits();
+        return ok([
+          { level:'Staff',            limit:L.staff,     role:'staff' },
+          { level:'Department Head',  limit:L.dept_head, role:'dept_head' },
+          { level:'Finance Manager',  limit:L.fm,        role:'finance_manager' },
+          { level:'CFO',              limit:L.cfo,       role:'cfo' },
+          { level:'Managing Director',limit:null,        role:'md' },
+        ]);
       }
 
       default:
@@ -302,6 +384,140 @@ export async function POST(req) {
         });
 
         return ok({ entry_id: entryId, entry_no }, 201);
+      }
+
+      // ── FIN-006: 3-way match a supplier invoice (LPO ↔ GRN ↔ invoice) ────
+      case 'match_invoice': {
+        const { supplier_id, lpo_id, invoice_no, invoice_amount, invoice_date } = body;
+        if (!lpo_id || !invoice_no || !invoice_amount) return err('lpo_id, invoice_no and invoice_amount required', 400);
+
+        const lpo = await queryOne(`SELECT * FROM lpos WHERE id=?`, [lpo_id]);
+        if (!lpo) return err('LPO not found', 404);
+        // The GRN proves goods were received — required before payment.
+        const grn = await queryOne(`SELECT * FROM grns WHERE lpo_id=? ORDER BY created_at DESC LIMIT 1`, [lpo_id]);
+
+        const tol = await require('../../../lib/settings').getNum('finance.match_tolerance', 0); // absolute Kshs tolerance
+        const variance = Math.round((invoice_amount - lpo.grand_total) * 100) / 100;
+
+        let match_status, status, exception_reason = null;
+        if (!grn || (grn.status !== 'completed' && grn.status !== 'received' && grn.status !== 'stage2')) {
+          match_status = 'no_grn'; status = 'exception';
+          exception_reason = 'No completed GRN — goods receipt not confirmed';
+        } else if (Math.abs(variance) > tol) {
+          match_status = 'variance'; status = 'exception';
+          exception_reason = `Invoice ${invoice_amount} vs LPO ${lpo.grand_total} (variance ${variance})`;
+        } else {
+          match_status = 'matched'; status = 'matched';
+        }
+
+        const id = uuid();
+        await run(
+          `INSERT INTO supplier_invoices (id,invoice_no,supplier_id,lpo_id,grn_id,invoice_amount,lpo_amount,invoice_date,match_status,variance_amount,status,exception_reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, invoice_no, supplier_id||lpo.supplier_id, lpo_id, grn?.id||null, invoice_amount, lpo.grand_total, invoice_date||new Date().toISOString().split('T')[0], match_status, variance, status, exception_reason]
+        );
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'MATCH_SUPPLIER_INVOICE', module: 'Finance', recordId: id, newValue: { match_status, variance } });
+        return ok({ id, match_status, status, variance, exception_reason }, 201);
+      }
+
+      // ── FIN-006: CFO clears a match exception ────────────────────────────
+      case 'approve_invoice_exception': {
+        if (!['cfo','md','admin'].includes(auth.user.role)) return err('FIN-006: only the CFO or MD may approve a 3-way-match exception', 403);
+        const { invoice_id } = body;
+        const inv = await queryOne(`SELECT * FROM supplier_invoices WHERE id=?`, [invoice_id]);
+        if (!inv) return err('Invoice not found', 404);
+        if (inv.status !== 'exception') return err('Invoice is not in exception status', 409);
+        await run(`UPDATE supplier_invoices SET status='matched', approved_by=?, approved_at=datetime('now') WHERE id=?`, [auth.user.employee_id, invoice_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'APPROVE_INVOICE_EXCEPTION', module: 'Finance', recordId: invoice_id });
+        return ok({ approved: true });
+      }
+
+      // ── FIN-006/007: raise a payment voucher (only from a matched invoice;
+      //     amount sets the required approval authority) ─────────────────────
+      case 'create_voucher': {
+        const { supplier_invoice_id, payee, amount, purpose, payment_method } = body;
+        let voucherAmount = amount, voucherPayee = payee, voucherPurpose = purpose, invId = null;
+
+        if (supplier_invoice_id) {
+          const inv = await queryOne(`SELECT si.*, s.name as supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON si.supplier_id=s.id WHERE si.id=?`, [supplier_invoice_id]);
+          if (!inv) return err('Supplier invoice not found', 404);
+          // FIN-006 gate: no payment until the 3-way match clears.
+          if (inv.status !== 'matched') return err('FIN-006: invoice must pass the 3-way match (or have its exception approved) before a payment voucher can be raised', 403);
+          voucherAmount = inv.invoice_amount; voucherPayee = inv.supplier_name || 'Supplier'; voucherPurpose = `Payment for invoice ${inv.invoice_no}`; invId = inv.id;
+        }
+        if (!voucherAmount || voucherAmount <= 0) return err('A positive amount (or a matched supplier_invoice_id) is required', 400);
+        if (!voucherPayee || !voucherPurpose) return err('payee and purpose required', 400);
+
+        const authority = await requiredAuthority(voucherAmount);
+        const id = uuid();
+        const voucher_no = `PV-${Date.now()}`;
+        await run(
+          `INSERT INTO payment_vouchers (id,voucher_no,date,payee,amount,purpose,payment_method,status,auth_level,required_level,supplier_invoice_id)
+           VALUES (?,?,?,?,?,?,?, 'pending_approval', ?, ?, ?)`,
+          [id, voucher_no, new Date().toISOString().split('T')[0], voucherPayee, voucherAmount, voucherPurpose, payment_method||'bank_transfer', authority.level, authority.level, invId]
+        );
+        if (invId) await run(`UPDATE supplier_invoices SET status='voucher_created' WHERE id=?`, [invId]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_PAYMENT_VOUCHER', module: 'Finance', recordId: id, newValue: { amount: voucherAmount, required_level: authority.level } });
+        return ok({ id, voucher_no, amount: voucherAmount, required_level: authority.level }, 201);
+      }
+
+      // ── FIN-007: approve a voucher — enforces the authority matrix ───────
+      case 'approve_voucher': {
+        const { voucher_id, signature_key } = body;
+        const v = await queryOne(`SELECT * FROM payment_vouchers WHERE id=?`, [voucher_id]);
+        if (!v) return err('Voucher not found', 404);
+        if (v.status === 'approved' || v.status === 'paid') return err('Voucher already approved', 409);
+
+        const required = await requiredAuthority(v.amount);
+        const myRank = AUTH_RANK[auth.user.role] || 0;
+        if (myRank < required.rank) {
+          return err(`FIN-007: this payment of Kshs ${v.amount.toLocaleString('en-KE')} requires ${required.level.replace('_',' ').toUpperCase()} authority. Your role cannot approve it — escalate.`, 403);
+        }
+        await run(`UPDATE payment_vouchers SET status='approved', approved_by=?, approved_sig=?, approved_at=datetime('now') WHERE id=?`,
+          [auth.user.employee_id, signature_key||`QSL-DS-${auth.user.role}-${Date.now()}`, voucher_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'APPROVE_PAYMENT_VOUCHER', module: 'Finance', recordId: voucher_id, newValue: { amount: v.amount, approver_rank: myRank } });
+        return ok({ approved: true, amount: v.amount, required_level: required.level });
+      }
+
+      // ── FIN-008: Finance Manager prepares a payment batch ────────────────
+      case 'create_batch': {
+        if (!['finance_manager','fm','cfo','md','admin'].includes(auth.user.role)) return err('FIN-008: only the Finance Manager prepares payment batches', 403);
+        const { voucher_ids } = body;
+        if (!Array.isArray(voucher_ids) || !voucher_ids.length) return err('voucher_ids[] required', 400);
+        const placeholders = voucher_ids.map(()=>'?').join(',');
+        const vouchers = await query(`SELECT * FROM payment_vouchers WHERE id IN (${placeholders}) AND status='approved' AND batch_id IS NULL`, voucher_ids);
+        if (!vouchers.length) return err('No eligible approved, unbatched vouchers found', 400);
+        const total = vouchers.reduce((s,v)=>s+v.amount,0);
+        const id = uuid();
+        const batch_no = `BATCH-${Date.now()}`;
+        await transaction(async ({ run: dbRun }) => {
+          await dbRun(`INSERT INTO payment_batches (id,batch_no,prepared_by,total_amount,voucher_count,status) VALUES (?,?,?,?,?,'draft')`,
+            [id, batch_no, auth.user.employee_id, total, vouchers.length]);
+          for (const v of vouchers) await dbRun(`UPDATE payment_vouchers SET batch_id=? WHERE id=?`, [id, v.id]);
+        });
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_PAYMENT_BATCH', module: 'Finance', recordId: id, newValue: { batch_no, total, count: vouchers.length } });
+        return ok({ id, batch_no, total_amount: total, voucher_count: vouchers.length }, 201);
+      }
+
+      // ── FIN-008: sign a batch — FM prepares → CFO reviews → MD approves ──
+      case 'sign_batch': {
+        const { batch_id, signer_role, signature_key } = body;
+        const b = await queryOne(`SELECT * FROM payment_batches WHERE id=?`, [batch_id]);
+        if (!b) return err('Batch not found', 404);
+        if (b.status === 'approved') return err('Batch already approved', 409);
+        const now = new Date().toISOString();
+        let update, newStatus;
+        if (signer_role === 'fm' && !b.fm_sig) { update = `fm_sig=?, fm_signed_at=?, status='fm_signed'`; newStatus='fm_signed'; }
+        else if (signer_role === 'cfo' && b.fm_sig && !b.cfo_sig) { update = `cfo_sig=?, cfo_signed_at=?, status='cfo_signed'`; newStatus='cfo_signed'; }
+        else if (signer_role === 'md' && b.cfo_sig && !b.md_sig) { update = `md_sig=?, md_signed_at=?, status='approved'`; newStatus='approved'; }
+        else return err('Invalid signing sequence: batches go Finance Manager → CFO → MD', 400);
+
+        await run(`UPDATE payment_batches SET ${update} WHERE id=?`, [signature_key||`QSL-DS-${signer_role}-${Date.now()}`, now, batch_id]);
+        if (newStatus === 'approved') {
+          await run(`UPDATE payment_vouchers SET status='paid' WHERE batch_id=?`, [batch_id]);
+        }
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: `SIGN_BATCH_${signer_role.toUpperCase()}`, module: 'Finance', recordId: batch_id, newValue: { status: newStatus } });
+        return ok({ signed: true, status: newStatus });
       }
 
       default:
