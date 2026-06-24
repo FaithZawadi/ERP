@@ -296,55 +296,104 @@ export async function POST(req) {
   try {
     switch (action) {
 
-      // ── Create imprest request ───────────────────────────────────────────
+      // ── FIN-011: imprest request → Line Manager approves → FM releases ───
       case 'create_imprest': {
-        const { employee_id, amount, purpose } = body;
+        const { employee_id, amount, purpose, expected_return_date, line_manager_id } = body;
         if (!employee_id || !amount || !purpose)
           return err('employee_id, amount and purpose required', 400);
         if (amount <= 0) return err('Amount must be positive', 400);
 
         const retireDays = await require('../../../lib/settings').getInt('finance.imprest_retire_days', 14);
         const issued   = new Date().toISOString().split('T')[0];
-        const due      = new Date(Date.now() + retireDays * 86400000).toISOString().split('T')[0];
+        const due      = expected_return_date || new Date(Date.now() + retireDays * 86400000).toISOString().split('T')[0];
         const ref_no   = `IMP-${Date.now()}`;
         const id       = uuid();
 
         await run(
-          `INSERT INTO imprest (id,ref_no,employee_id,amount,purpose,date_issued,due_date,status)
-           VALUES (?,?,?,?,?,?,?,?)`,
-          [id, ref_no, employee_id, amount, purpose, issued, due, 'pending']
+          `INSERT INTO imprest (id,ref_no,employee_id,amount,purpose,date_issued,due_date,status,expected_return_date,line_manager_id)
+           VALUES (?,?,?,?,?,?,?, 'requested', ?, ?)`,
+          [id, ref_no, employee_id, amount, purpose, issued, due, expected_return_date||due, line_manager_id||null]
         );
-
-        await logAudit(query, {
-          userId: auth.user.id, userName: auth.user.name,
-          action: 'CREATE_IMPREST', module: 'Finance',
-          recordId: id, newValue: { amount, purpose, due },
-        });
-
-        return ok({ id, ref_no, due_date: due }, 201);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_IMPREST', module: 'Finance', recordId: id, newValue: { amount, purpose } });
+        return ok({ id, ref_no, status: 'requested' }, 201);
       }
 
-      // ── Check & convert overdue imprest ──────────────────────────────────
+      // ── FIN-011: Line Manager approves the request ───────────────────────
+      case 'approve_imprest_request': {
+        const { id } = body;
+        const imp = await queryOne(`SELECT * FROM imprest WHERE id=?`, [id]);
+        if (!imp) return err('Imprest not found', 404);
+        if (imp.status !== 'requested') return err(`Cannot approve — status is ${imp.status}`, 409);
+        await run(`UPDATE imprest SET status='approved', approved_by=?, approved_at=datetime('now') WHERE id=?`, [auth.user.employee_id, id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'APPROVE_IMPREST', module: 'Finance', recordId: id });
+        return ok({ approved: true });
+      }
+
+      // ── FIN-011: Finance Manager releases the cash (starts the 14-day clock)
+      case 'release_imprest': {
+        if (!['finance_manager','fm','cfo','md','admin'].includes(auth.user.role)) return err('FIN-011: only the Finance Manager releases imprest', 403);
+        const { id } = body;
+        const imp = await queryOne(`SELECT * FROM imprest WHERE id=?`, [id]);
+        if (!imp) return err('Imprest not found', 404);
+        if (imp.status !== 'approved') return err('Imprest must be approved by the Line Manager before release', 409);
+        const retireDays = await require('../../../lib/settings').getInt('finance.imprest_retire_days', 14);
+        const due = new Date(Date.now() + retireDays * 86400000).toISOString().split('T')[0];
+        await run(`UPDATE imprest SET status='released', released_by=?, released_at=datetime('now'), date_issued=date('now'), due_date=? WHERE id=?`, [auth.user.employee_id, due, id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'RELEASE_IMPREST', module: 'Finance', recordId: id, newValue: { due_date: due } });
+        return ok({ released: true, due_date: due });
+      }
+
+      // ── FIN-012A: Finance Manager clears a spot-checked receipt ──────────
+      case 'verify_receipt': {
+        const { id } = body;
+        await run(`UPDATE imprest SET receipt_verified=1, spot_check=0 WHERE id=?`, [id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'VERIFY_IMPREST_RECEIPT', module: 'Finance', recordId: id });
+        return ok({ verified: true });
+      }
+
+      // ── FIN-012A: a false receipt triggers the disciplinary workflow ─────
+      case 'flag_false_receipt': {
+        const { id, reason } = body;
+        const imp = await queryOne(`SELECT i.*, e.first_name||' '||e.last_name as name FROM imprest i JOIN employees e ON i.employee_id=e.id WHERE i.id=?`, [id]);
+        if (!imp) return err('Imprest not found', 404);
+        await run(`UPDATE imprest SET status='FALSE_RECEIPT', receipt_verified=0, notes=? WHERE id=?`, [reason||'False receipt detected on spot-check', id]);
+        // Raise a disciplinary task to HR (the disciplinary workflow entry point).
+        await run(`INSERT INTO tasks (id,title,assignee_id,due_date,priority,status,module,description) VALUES (?,?,?,date('now','+3 days'),'critical','pending','HR',?)`,
+          [uuid(), `Disciplinary: false receipt — ${imp.name} (${imp.ref_no})`, imp.line_manager_id||imp.employee_id, `Spot-check flagged a false receipt on imprest ${imp.ref_no}. ${reason||''}`]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'FLAG_FALSE_RECEIPT', module: 'Finance', recordId: id, newValue: { reason } });
+        return ok({ flagged: true, disciplinary_task_created: true });
+      }
+
+      // ── FIN-012B/C: 14-day rule — unretired imprest converts irreversibly
+      //    to a Personal Advance, recovered from the next payroll run ────────
       case 'check_overdue_imprest': {
         const today = new Date().toISOString().split('T')[0];
+        // Active (released, or legacy 'pending') imprest past its due date and
+        // not yet (fully) accounted.
         const overdue = await query(
-          `SELECT * FROM imprest WHERE due_date < ? AND status='pending'`, [today]
+          `SELECT i.*, e.email, e.first_name||' '||e.last_name as name
+           FROM imprest i JOIN employees e ON i.employee_id=e.id
+           WHERE i.due_date < ? AND i.status IN ('released','pending','approved')`, [today]
         );
 
         const converted = [];
         for (const imp of overdue) {
+          const balance = Math.max(0, (imp.amount || 0) - (imp.amount_accounted || 0));
           await run(
-            `UPDATE imprest SET status='OVERDUE', converted_to_advance=1, converted_at=? WHERE id=?`,
-            [new Date().toISOString(), imp.id]
+            `UPDATE imprest SET status='CONVERTED', converted_to_advance=1, converted_at=datetime('now'),
+                    advance_balance=?, notified_at=datetime('now') WHERE id=?`,
+            [balance, imp.id]
           );
-          converted.push(imp.id);
-          await logAudit(query, {
-            userId: 'SYSTEM', userName: 'System',
-            action: 'CONVERT_IMPREST_OVERDUE', module: 'Finance',
-            recordId: imp.id, oldValue: { status: 'pending' }, newValue: { status: 'OVERDUE' },
-          });
+          converted.push({ id: imp.id, ref_no: imp.ref_no, name: imp.name, balance });
+          // FIN-012C: notify the staff member that it has become a salary-recoverable advance.
+          try {
+            const { send } = require('../../../lib/email');
+            if (imp.email) await send({ to: imp.email, subject: `Imprest ${imp.ref_no} converted to a Personal Advance`,
+              html: `<p>Dear ${imp.name},</p><p>Imprest <b>${imp.ref_no}</b> (Kshs ${balance.toLocaleString('en-KE')}) was not retired within the allowed period and has, per QSL-FIN-CHP-001, irreversibly converted to a <b>Personal Advance</b>. It will be deducted from your next salary.</p>` });
+          } catch (e) { /* email is best-effort */ }
+          await logAudit(query, { userId: 'SYSTEM', userName: 'System', action: 'CONVERT_IMPREST_TO_ADVANCE', module: 'Finance', recordId: imp.id, newValue: { advance_balance: balance } });
         }
-        return ok({ converted_count: converted.length, ids: converted });
+        return ok({ converted_count: converted.length, pending_conversions: converted });
       }
 
       // ── Create payroll run ────────────────────────────────────────────────
@@ -359,24 +408,23 @@ export async function POST(req) {
           `SELECT * FROM employees WHERE status='active'`
         );
 
-        // Calculate payslips for all active employees
-        const entries = employees.map(e => {
-          const ps = calculatePayslip({
-            basic_salary: e.basic_salary,
-            allowances:   0,
-          });
-          return { ...ps, employee_id: e.id, id: uuid() };
-        });
+        // Calculate payslips, recovering any converted imprest advances (FIN-012C).
+        const entries = [];
+        for (const e of employees) {
+          const ps = calculatePayslip({ basic_salary: e.basic_salary, allowances: 0 });
+          const advances = await query(
+            `SELECT id, advance_balance FROM imprest WHERE employee_id=? AND status='CONVERTED' AND deducted_in_run IS NULL`, [e.id]
+          );
+          const imprest_deduct = advances.reduce((s, a) => s + (a.advance_balance || 0), 0);
+          entries.push({ ...ps, employee_id: e.id, id: uuid(), imprest_deduct, net_pay: Math.max(0, ps.net_pay - imprest_deduct), advance_ids: advances.map(a => a.id) });
+        }
 
         const totals = entries.reduce((acc, e) => {
-          acc.gross  += e.gross_pay;
-          acc.paye   += e.paye;
-          acc.nhif   += e.nhif;
-          acc.nssf   += e.nssf;
-          acc.housing += e.housing_levy;
-          acc.net    += e.net_pay;
+          acc.gross  += e.gross_pay; acc.paye += e.paye; acc.nhif += e.nhif;
+          acc.nssf += e.nssf; acc.housing += e.housing_levy; acc.net += e.net_pay;
+          acc.imprest += e.imprest_deduct;
           return acc;
-        }, { gross: 0, paye: 0, nhif: 0, nssf: 0, housing: 0, net: 0 });
+        }, { gross: 0, paye: 0, nhif: 0, nssf: 0, housing: 0, net: 0, imprest: 0 });
 
         const runId = uuid();
         await transaction(async ({ run: dbRun }) => {
@@ -387,14 +435,18 @@ export async function POST(req) {
           );
           for (const e of entries) {
             await dbRun(
-              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,net_pay)
-               VALUES (?,?,?,?,?,?,?,?,?,?)`,
-              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.net_pay]
+              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,imprest_deduct,net_pay)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.imprest_deduct||0, e.net_pay]
             );
+            // Mark recovered advances against this run so they aren't deducted twice.
+            for (const advId of e.advance_ids) {
+              await dbRun(`UPDATE imprest SET status='deducted', deducted_in_run=?, deducted_at=datetime('now') WHERE id=?`, [runId, advId]);
+            }
           }
         });
 
-        return ok({ run_id: runId, period, entries_count: entries.length, totals }, 201);
+        return ok({ run_id: runId, period, entries_count: entries.length, totals, advances_recovered: totals.imprest }, 201);
       }
 
       // ── Sign payroll ──────────────────────────────────────────────────────
@@ -793,13 +845,21 @@ export async function PUT(req) {
 
   try {
     switch (action) {
+      // ── FIN-012A: retire imprest — a receipt is mandatory before claiming;
+      //    ~20% are auto-flagged for Finance Manager spot-check ──────────────
       case 'account_imprest': {
         const { amount_accounted, receipt_path } = body;
+        const imp = await queryOne(`SELECT * FROM imprest WHERE id=?`, [id]);
+        if (!imp) return err('Imprest not found', 404);
+        const receipt = receipt_path || imp.receipt_path;
+        if (!receipt) return err('FIN-012A: a receipt photo/PDF is mandatory before an imprest can be claimed/retired. Upload the receipt first.', 400);
+        const spot = Math.random() < 0.2 ? 1 : 0; // 20% spot-check
         await run(
-          `UPDATE imprest SET amount_accounted=?, receipt_path=?, status='accounted', updated=datetime('now') WHERE id=?`,
-          [amount_accounted, receipt_path, id]
+          `UPDATE imprest SET amount_accounted=?, receipt_path=?, status='accounted', spot_check=?, receipt_verified=? WHERE id=?`,
+          [amount_accounted, receipt, spot, spot ? 0 : 1, id]
         );
-        return ok({ updated: true });
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'RETIRE_IMPREST', module: 'Finance', recordId: id, newValue: { amount_accounted, spot_check: spot } });
+        return ok({ updated: true, spot_check: !!spot });
       }
 
       case 'upload_receipt': {

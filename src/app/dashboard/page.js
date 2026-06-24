@@ -499,6 +499,7 @@ function Finance({ api }) {
   const [budgetYear,setBudgetYear]=useState('2026');
   const [bForm,setBForm]=useState({department:'',cost_centre:'',annual_amount:''});
   const [tForm,setTForm]=useState({scope:'',annual_target:''});
+  const [retireForm,setRetireForm]=useState({id:'',amount_accounted:'',receipt_path:''});
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -524,8 +525,16 @@ function Finance({ api }) {
   const createImprest = async () => {
     if(!form.employee_id||!form.amount||!form.purpose) return;
     const r=await api.post('/api/finance',{action:'create_imprest',...form,amount:parseFloat(form.amount)});
-    if(r?.success){setMsg({type:'success',text:`Imprest ${r.data.ref_no} created. Due: ${fmt.date(r.data.due_date)}`});setModal(null);setForm({employee_id:'',amount:'',purpose:''});load('imprest');}
+    if(r?.success){setMsg({type:'success',text:`Imprest ${r.data.ref_no} requested — awaiting Line Manager approval`});setModal(null);setForm({employee_id:'',amount:'',purpose:''});load('imprest');}
     else setMsg({type:'error',text:r?.error||'Failed to create imprest'});
+  };
+  // FIN-011/012A imprest workflow
+  const impAction = async (action,id,extra={}) => { const r=await api.post('/api/finance',{action,id,...extra}); if(r?.success){setMsg({type:'success',text:'Done'});load('imprest');} else setMsg({type:'error',text:r?.error}); };
+  const retireImprest = async () => {
+    if(!retireForm.id||!retireForm.amount_accounted||!retireForm.receipt_path){ setMsg({type:'error',text:'Receipt reference and amount are required (FIN-012A)'}); return; }
+    const r=await api.put('/api/finance',{action:'account_imprest',id:retireForm.id,amount_accounted:parseFloat(retireForm.amount_accounted),receipt_path:retireForm.receipt_path});
+    if(r?.success){setMsg({type:r.data.spot_check?'warning':'success',text:r.data.spot_check?'Retired — flagged for FM spot-check':'Imprest retired'});setModal(null);setRetireForm({id:'',amount_accounted:'',receipt_path:''});load('imprest');}
+    else setMsg({type:'error',text:r?.error});
   };
 
   const createPayroll = async () => {
@@ -602,15 +611,19 @@ function Finance({ api }) {
           <SectionHeader title="Imprest Register" sub={`${imprest.filter(i=>i.status==='OVERDUE').length} overdue · ${imprest.filter(i=>i.status==='CONVERTED').length} converted`}
             action={<div style={{display:'flex',gap:8}}><Btn size="sm" variant="ghost" onClick={checkOverdue}>Check Overdue</Btn><Btn onClick={()=>setModal('imprest')}>+ Request Imprest</Btn></div>}/>
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Ref No','Employee','Purpose','Amount','Issued','Due Date','Status']}
+            <DataTable headers={['Ref No','Employee','Purpose','Amount','Due Date','Status','Workflow']}
               rows={imprest.map(i=>[
                 <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{i.ref_no}</span>,
                 <strong>{i.employee_name}</strong>,
-                <span style={{fontSize:12}}>{(i.purpose||'').slice(0,45)}{i.purpose?.length>45?'…':''}</span>,
+                <span style={{fontSize:12}}>{(i.purpose||'').slice(0,40)}{i.purpose?.length>40?'…':''}</span>,
                 <strong>{fmt.kes(i.amount)}</strong>,
-                fmt.date(i.date_issued),
                 fmt.date(i.due_date),
-                <Badge variant={i.status==='OVERDUE'?'red':i.status==='CONVERTED'?'purple':i.status==='accounted'?'green':'amber'}>{i.status}</Badge>,
+                <Badge variant={i.status==='CONVERTED'||i.status==='FALSE_RECEIPT'?'red':i.status==='deducted'?'purple':i.status==='accounted'?'green':i.status==='released'?'blue':'amber'}>{i.status}{i.spot_check?' ⚑':''}</Badge>,
+                i.status==='requested'?<Btn size="sm" onClick={()=>impAction('approve_imprest_request',i.id)}>Approve</Btn>
+                :i.status==='approved'?<Btn size="sm" onClick={()=>impAction('release_imprest',i.id)}>Release</Btn>
+                :i.status==='released'?<Btn size="sm" onClick={()=>{setRetireForm({id:i.id,amount_accounted:String(i.amount),receipt_path:''});setModal('retire');}}>Retire</Btn>
+                :(i.status==='accounted'&&i.spot_check)?<div style={{display:'flex',gap:4}}><Btn size="sm" variant="ghost" onClick={()=>impAction('verify_receipt',i.id)}>Verify</Btn><Btn size="sm" variant="danger" onClick={()=>impAction('flag_false_receipt',i.id,{reason:'Spot-check failed'})}>False</Btn></div>
+                :'—',
               ])}
             />
           </Card>
@@ -856,13 +869,22 @@ function Finance({ api }) {
         </>
       )}
 
+      {modal==='retire'&&(
+        <Modal title="Retire Imprest — receipt required (FIN-012A)" onClose={()=>setModal(null)} width={480}>
+          <Alert type="info">A receipt photo/PDF is mandatory before claiming. ~20% of retirements are auto-flagged for a Finance Manager spot-check.</Alert>
+          <Input label="Amount Accounted (Kshs)" type="number" value={retireForm.amount_accounted} onChange={v=>setRetireForm({...retireForm,amount_accounted:v})} required/>
+          <Input label="Receipt reference / URL" value={retireForm.receipt_path} onChange={v=>setRetireForm({...retireForm,receipt_path:v})} required placeholder="uploaded receipt path or URL"/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={retireImprest} disabled={!retireForm.amount_accounted||!retireForm.receipt_path}>Retire</Btn></div>
+        </Modal>
+      )}
+
       {modal==='imprest'&&(
         <Modal title="Request Imprest — QSL-FIN-CHP-001" onClose={()=>setModal(null)}>
-          <Alert type="warning">14-day rule: Unaccounted imprest <strong>automatically and irreversibly converts</strong> to a personal advance on Day 14.</Alert>
+          <Alert type="warning">Flow: request → Line Manager approves → Finance Manager releases. The 14-day clock starts at release; unretired imprest converts irreversibly to a personal advance.</Alert>
           <Select label="Employee" value={form.employee_id} onChange={v=>setForm({...form,employee_id:v})} required options={[{value:'',label:'Select employee…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name} — ${e.department}`}))]}/>
           <Input label="Amount (Kshs)" value={form.amount} onChange={v=>setForm({...form,amount:v})} type="number" required placeholder="0"/>
           <Input label="Purpose" value={form.purpose} onChange={v=>setForm({...form,purpose:v})} required placeholder="Business purpose…"/>
-          <Input label="Due Date (auto — 14 days)" value={new Date(Date.now()+14*86400000).toISOString().split('T')[0]} readOnly note="Cannot be extended per QSL-FIN-CHP-001"/>
+          <Input label="Expected Return Date" type="date" value={form.expected_return_date||''} onChange={v=>setForm({...form,expected_return_date:v})}/>
           <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
             <Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn>
             <Btn onClick={createImprest} disabled={!form.employee_id||!form.amount||!form.purpose}>Submit Request</Btn>

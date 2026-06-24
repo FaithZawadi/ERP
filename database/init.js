@@ -283,6 +283,15 @@ CREATE TABLE IF NOT EXISTS imprest (
   converted_at    TEXT,
   converted_to_advance INTEGER DEFAULT 0,
   notes           TEXT,
+  expected_return_date TEXT,                 -- FIN-011
+  line_manager_id TEXT REFERENCES employees(id),
+  released_by     TEXT REFERENCES employees(id),  -- Finance Manager releases (FIN-011)
+  released_at     TEXT,
+  spot_check      INTEGER DEFAULT 0,          -- flagged for FM 20% spot-check (FIN-012A)
+  advance_balance REAL DEFAULT 0,             -- unretired balance converted to a personal advance (FIN-012B)
+  deducted_in_run TEXT,                        -- payroll run that recovered the advance (FIN-012C)
+  deducted_at     TEXT,
+  notified_at     TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
