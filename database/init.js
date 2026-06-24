@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS employees (
   kra_pin           TEXT,
   nhif_no           TEXT,
   nssf_no           TEXT,
+  helb_monthly      REAL DEFAULT 0,
   department        TEXT NOT NULL,
   role              TEXT NOT NULL,
   grade             TEXT,
@@ -190,6 +191,8 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
   total_nssf      REAL DEFAULT 0,
   total_housing   REAL DEFAULT 0,
   total_net       REAL DEFAULT 0,
+  cutoff_date     TEXT,                     -- HR-008: payroll cut-off (20th)
+  pay_date        TEXT,                     -- HR-008: salary pay date (last working day)
   fm_sig          TEXT,
   fm_signed_at    TEXT,
   cfo_sig         TEXT,
@@ -198,6 +201,21 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
   md_signed_at    TEXT,
   locked_at       TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Overtime records (HR-012): 1.5× weekday, 2× Sunday/holiday; approved
+-- overtime is added to gross in the next payroll run.
+CREATE TABLE IF NOT EXISTS overtime (
+  id            TEXT PRIMARY KEY,
+  employee_id   TEXT REFERENCES employees(id),
+  period        TEXT NOT NULL,             -- YYYY-MM
+  weekday_hours REAL DEFAULT 0,
+  holiday_hours REAL DEFAULT 0,
+  amount        REAL DEFAULT 0,            -- computed KES
+  status        TEXT DEFAULT 'approved',   -- approved | paid
+  paid_in_run   TEXT,
+  created_by    TEXT REFERENCES employees(id),
+  created_at    TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS payroll_entries (
@@ -211,6 +229,8 @@ CREATE TABLE IF NOT EXISTS payroll_entries (
   nhif            REAL DEFAULT 0,
   nssf            REAL DEFAULT 0,
   housing_levy    REAL DEFAULT 0,
+  helb            REAL DEFAULT 0,
+  overtime        REAL DEFAULT 0,
   imprest_deduct  REAL DEFAULT 0,
   other_deductions REAL DEFAULT 0,
   net_pay         REAL NOT NULL,

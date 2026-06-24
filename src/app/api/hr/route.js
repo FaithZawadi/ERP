@@ -4,7 +4,7 @@ import { NextResponse } from 'next/server';
 import { v4 as uuid }   from 'uuid';
 import { requireAuth, ok, err, logAudit } from '../../../lib/auth';
 import { query, queryOne, run } from '../../../lib/db';
-import { calculatePayslip } from '../../../lib/tax';
+import { calculatePayslip, calculateOvertime } from '../../../lib/tax';
 
 export async function GET(req) {
   const auth = await requireAuth(req);
@@ -236,6 +236,29 @@ export async function POST(req) {
         await run(`UPDATE employees SET l_and_d_hours=l_and_d_hours+? WHERE id=?`, [hours, employee_id]);
 
         return ok({ id, hours_added: hours }, 201);
+      }
+
+      // ── HR-012: log overtime (1.5× weekday, 2× Sunday/holiday) ───────────
+      case 'log_overtime': {
+        const { employee_id, period, weekday_hours, holiday_hours } = body;
+        if (!employee_id || !period) return err('employee_id and period required', 400);
+        const emp = await queryOne(`SELECT basic_salary FROM employees WHERE id=?`, [employee_id]);
+        if (!emp) return err('Employee not found', 404);
+        const ot = calculateOvertime(emp.basic_salary || 0, parseFloat(weekday_hours)||0, parseFloat(holiday_hours)||0);
+        const id = uuid();
+        await run(`INSERT INTO overtime (id,employee_id,period,weekday_hours,holiday_hours,amount,status,created_by) VALUES (?,?,?,?,?,?,'approved',?)`,
+          [id, employee_id, period, parseFloat(weekday_hours)||0, parseFloat(holiday_hours)||0, ot.total, auth.user.employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'LOG_OVERTIME', module: 'HR', recordId: id, newValue: { period, amount: ot.total } });
+        return ok({ id, ...ot }, 201);
+      }
+
+      // ── HR-007: set an employee's monthly HELB deduction ─────────────────
+      case 'set_helb': {
+        const { employee_id, helb_monthly } = body;
+        if (!employee_id) return err('employee_id required', 400);
+        await run(`UPDATE employees SET helb_monthly=? WHERE id=?`, [parseFloat(helb_monthly)||0, employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'SET_HELB', module: 'HR', recordId: employee_id, newValue: { helb_monthly } });
+        return ok({ updated: true });
       }
 
       default:

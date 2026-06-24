@@ -139,24 +139,27 @@ function calculatePayslip(employee) {
   const {
     basic_salary      = 0,
     allowances        = 0,
+    overtime          = 0,   // taxable overtime earnings (HR-012)
+    helb              = 0,   // monthly HELB loan repayment, post-tax deduction (HR-007)
     insurance_premium = 0,
     imprest_deductions = 0,
     other_deductions  = 0,
   } = employee;
 
-  const grossPay = basic_salary + allowances;
+  const grossPay = basic_salary + allowances + overtime;
 
   const paye_calc   = calculatePAYE(grossPay, insurance_premium);
   const nhif        = calculateNHIF(grossPay);
   const nssf_calc   = calculateNSSF(grossPay);
   const housing_calc = calculateHousingLevy(grossPay);
 
-  const totalDeductions = paye_calc.paye + nhif + nssf_calc.total + housing_calc.employee + imprest_deductions + other_deductions;
+  const totalDeductions = paye_calc.paye + nhif + nssf_calc.total + housing_calc.employee + helb + imprest_deductions + other_deductions;
   const netPay          = Math.max(0, grossPay - totalDeductions);
 
   return {
     basic_salary,
     allowances,
+    overtime,
     gross_pay:     grossPay,
     paye:          paye_calc.paye,
     nhif,
@@ -164,6 +167,7 @@ function calculatePayslip(employee) {
     nssf_tier1:    nssf_calc.tier1,
     nssf_tier2:    nssf_calc.tier2,
     housing_levy:  housing_calc.employee,
+    helb,
     employer_nssf: nssf_calc.employer,
     employer_housing: housing_calc.employer,
     imprest_deductions,
@@ -172,6 +176,16 @@ function calculatePayslip(employee) {
     net_pay:       netPay,
     effective_paye_rate: paye_calc.effectiveRate,
   };
+}
+
+// HR-012: overtime earnings — 1.5× normal hourly rate on weekdays, 2× on
+// Sundays/public holidays (Employment Act 2007). Hourly rate = monthly basic
+// over a 26-day × 8-hour month.
+function calculateOvertime(basicSalary, weekdayHours = 0, holidayHours = 0) {
+  const hourly = basicSalary / 26 / 8;
+  const weekday = Math.round(weekdayHours * hourly * 1.5);
+  const holiday = Math.round(holidayHours * hourly * 2);
+  return { hourly: Math.round(hourly * 100) / 100, weekday, holiday, total: weekday + holiday };
 }
 
 // ── VAT CALCULATION ───────────────────────────────────────────────────────────
@@ -291,6 +305,7 @@ module.exports = {
   calculateNSSF,
   calculateHousingLevy,
   calculatePayslip,
+  calculateOvertime,
   calculateVAT,
   extractVAT,
   calculateWHT,

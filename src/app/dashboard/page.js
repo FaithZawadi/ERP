@@ -572,6 +572,15 @@ function Finance({ api }) {
     else setMsg({type:'error',text:r?.error||'Signing failed'});
   };
 
+  const downloadBankFile = async (bank) => {
+    const period = payroll?.period || '2026-06';
+    const token = typeof window!=='undefined' ? localStorage.getItem('qsl_token') : null;
+    const res = await fetch(`/api/finance?section=bank_file&period=${period}&bank=${bank}`, { headers:{ Authorization:`Bearer ${token}` } });
+    if(!res.ok){ setMsg({type:'error',text:'No payroll to export for this period'}); return; }
+    const blob = await res.blob(); const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=`payroll_${period}_${bank}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  };
+
   const checkOverdue = async () => {
     const r=await api.post('/api/finance',{action:'check_overdue_imprest'});
     if(r?.success) setMsg({type:'success',text:`${r.data.converted_count} imprest records checked and converted where overdue`});
@@ -691,6 +700,9 @@ function Finance({ api }) {
                 </div>
               </Card>
 
+              {(payroll.cutoff_date||payroll.pay_date)&&(
+                <Alert type="info">HR-008 — Cut-off: <strong>{fmt.date(payroll.cutoff_date)}</strong> · Pay date (last working day): <strong>{fmt.date(payroll.pay_date)}</strong></Alert>
+              )}
               {/* Summary stats */}
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
                 <Stat label="Total Gross" value={fmt.kes(payroll.total_gross)} icon="💰"/>
@@ -699,18 +711,21 @@ function Finance({ api }) {
                 <Stat label="Total Net Pay" value={fmt.kes(payroll.total_net)} icon="✅" variant="green"/>
               </div>
 
+              <SectionHeader title="Payroll Register" sub="HR-011 bank payment file export"
+                action={<div style={{display:'flex',gap:6,flexWrap:'wrap'}}>{['KCB','EQUITY','NCBA','CO-OP','ALL'].map(bk=><Btn key={bk} size="sm" variant="ghost" onClick={()=>downloadBankFile(bk)}>⬇ {bk}</Btn>)}</div>}/>
               <Card style={{padding:0,overflow:'hidden'}}>
-                <DataTable headers={['Employee','Dept','Gross Pay','PAYE','NHIF','NSSF','Housing','Net Pay','Status']}
+                <DataTable headers={['Employee','Dept','Basic','Overtime','Gross','PAYE','NSSF','SHA','HELB','Net Pay']}
                   rows={payrollEntries.map(e=>[
                     <strong>{e.name}</strong>,
                     <Badge variant="navy">{e.department}</Badge>,
+                    fmt.kes(e.basic_salary),
+                    e.overtime?<span style={{color:T.blue}}>{fmt.kes(e.overtime)}</span>:'—',
                     fmt.kes(e.gross_pay),
                     <span style={{color:T.red}}>{fmt.kes(e.paye)}</span>,
-                    fmt.kes(e.nhif),
                     fmt.kes(e.nssf),
-                    fmt.kes(e.housing_levy),
+                    fmt.kes(e.nhif),
+                    e.helb?<span style={{color:T.amber}}>{fmt.kes(e.helb)}</span>:'—',
                     <strong style={{color:T.green}}>{fmt.kes(e.net_pay)}</strong>,
-                    <Badge variant="amber">{payroll.status}</Badge>,
                   ])}
                 />
               </Card>
@@ -1608,6 +1623,8 @@ function HR({ api }) {
   const [modal,setModal]=useState(null);
   const [form,setForm]=useState({first_name:'',last_name:'',email:'',department:'Engineering',role:'',basic_salary:''});
   const [msg,setMsg]=useState(null);
+  const [helbForm,setHelbForm]=useState({employee_id:'',helb_monthly:''});
+  const [otForm,setOtForm]=useState({employee_id:'',period:'2026-06',weekday_hours:'',holiday_hours:''});
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -1632,11 +1649,35 @@ function HR({ api }) {
     load('attendance');
   };
 
+  const setHelb = async () => { if(!helbForm.employee_id)return; const r=await api.post('/api/hr',{action:'set_helb',employee_id:helbForm.employee_id,helb_monthly:parseFloat(helbForm.helb_monthly||0)}); if(r?.success){setMsg({type:'success',text:'HELB monthly deduction saved'});setHelbForm({employee_id:'',helb_monthly:''});load('employees');} else setMsg({type:'error',text:r?.error}); };
+  const logOvertime = async () => { if(!otForm.employee_id||!otForm.period)return; const r=await api.post('/api/hr',{action:'log_overtime',...otForm,weekday_hours:parseFloat(otForm.weekday_hours||0),holiday_hours:parseFloat(otForm.holiday_hours||0)}); if(r?.success){setMsg({type:'success',text:`Overtime logged — ${fmt.kes(r.data.total)} (1.5×/2×)`});setOtForm({employee_id:'',period:otForm.period,weekday_hours:'',holiday_hours:''});} else setMsg({type:'error',text:r?.error}); };
+
   return (
     <div>
       {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'}]} active={tab} setActive={t=>{setTab(t);}}/>
+      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'},{id:'payroll_inputs',label:'Payroll Inputs'}]} active={tab} setActive={t=>{setTab(t);}}/>
       {loading&&<Loading/>}
+
+      {!loading&&tab==='payroll_inputs'&&(
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
+          <Card>
+            <SectionHeader title="HELB Deduction (HR-007)" sub="Monthly loan repayment, deducted in payroll"/>
+            <Select label="Employee" value={helbForm.employee_id} onChange={v=>setHelbForm({...helbForm,employee_id:v})} options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>
+            <Input label="HELB Monthly (Kshs)" type="number" value={helbForm.helb_monthly} onChange={v=>setHelbForm({...helbForm,helb_monthly:v})}/>
+            <Btn size="sm" onClick={setHelb} disabled={!helbForm.employee_id} style={{marginTop:8}}>Save HELB</Btn>
+          </Card>
+          <Card>
+            <SectionHeader title="Overtime (HR-012)" sub="1.5× weekday · 2× Sunday/holiday"/>
+            <Select label="Employee" value={otForm.employee_id} onChange={v=>setOtForm({...otForm,employee_id:v})} options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+              <Input label="Period" value={otForm.period} onChange={v=>setOtForm({...otForm,period:v})} placeholder="YYYY-MM"/>
+              <Input label="Weekday hrs" type="number" value={otForm.weekday_hours} onChange={v=>setOtForm({...otForm,weekday_hours:v})}/>
+              <Input label="Holiday hrs" type="number" value={otForm.holiday_hours} onChange={v=>setOtForm({...otForm,holiday_hours:v})}/>
+            </div>
+            <Btn size="sm" onClick={logOvertime} disabled={!otForm.employee_id} style={{marginTop:8}}>Log Overtime</Btn>
+          </Card>
+        </div>
+      )}
 
       {!loading&&tab==='employees'&&(
         <>

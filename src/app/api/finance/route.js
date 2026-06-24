@@ -344,6 +344,35 @@ export async function GET(req) {
         return ok({ employee: emp, year, months, totals });
       }
 
+      // ── HR-011: bank payment file (CSV) for a payroll run, per bank ──────
+      case 'bank_file': {
+        const p = period || new Date().toISOString().slice(0,7);
+        const bank = (searchParams.get('bank') || 'ALL').toUpperCase();
+        const run = await queryOne(`SELECT * FROM payroll_runs WHERE period=?`, [p]);
+        if (!run) return err('No payroll run for this period', 404);
+        let rows = await query(
+          `SELECT e.first_name||' '||e.last_name as name, e.bank_name, e.bank_account, e.bank_branch, pe.net_pay
+           FROM payroll_entries pe JOIN employees e ON pe.employee_id=e.id WHERE pe.run_id=?`, [run.id]
+        );
+        if (bank !== 'ALL') rows = rows.filter(r => (r.bank_name||'').toUpperCase().includes(bank));
+        // Per-bank header layout; columns are otherwise common.
+        const headers = {
+          KCB:    'AccountNumber,AccountName,Branch,Amount,Narration',
+          EQUITY: 'Account,Name,Branch,Amount,Reference',
+          NCBA:   'BeneficiaryAccount,BeneficiaryName,Branch,Amount,Details',
+          'CO-OP':'AccountNo,AccountName,Branch,Amount,Narrative',
+          COOP:   'AccountNo,AccountName,Branch,Amount,Narrative',
+          ALL:    'AccountNumber,AccountName,Bank,Branch,Amount,Reference',
+        };
+        const head = headers[bank] || headers.ALL;
+        const ref = `Salary ${p}`;
+        const body = rows.map(r => bank === 'ALL'
+          ? `${r.bank_account||''},${r.name},${r.bank_name||''},${r.bank_branch||''},${Math.round(r.net_pay)},${ref}`
+          : `${r.bank_account||''},${r.name},${r.bank_branch||''},${Math.round(r.net_pay)},${ref}`).join('\n');
+        const csv = `${head}\n${body}\n`;
+        return new Response(csv, { status: 200, headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="payroll_${p}_${bank}.csv"` } });
+      }
+
       // ── The payment authority matrix (live from settings) — FIN-007 ──────
       case 'payment_authority': {
         const L = await paymentLimits();
@@ -492,45 +521,55 @@ export async function POST(req) {
           `SELECT * FROM employees WHERE status='active'`
         );
 
-        // Calculate payslips, recovering any converted imprest advances (FIN-012C).
+        // Calculate payslips: HELB + approved overtime (HR-007/012) and recover
+        // converted imprest advances (FIN-012C).
         const entries = [];
         for (const e of employees) {
-          const ps = calculatePayslip({ basic_salary: e.basic_salary, allowances: 0 });
+          const ot = await query(`SELECT id, amount FROM overtime WHERE employee_id=? AND period=? AND status='approved'`, [e.id, period]);
+          const overtime = ot.reduce((s, o) => s + (o.amount || 0), 0);
+          const ps = calculatePayslip({ basic_salary: e.basic_salary, allowances: 0, overtime, helb: e.helb_monthly || 0 });
           const advances = await query(
             `SELECT id, advance_balance FROM imprest WHERE employee_id=? AND status='CONVERTED' AND deducted_in_run IS NULL`, [e.id]
           );
           const imprest_deduct = advances.reduce((s, a) => s + (a.advance_balance || 0), 0);
-          entries.push({ ...ps, employee_id: e.id, id: uuid(), imprest_deduct, net_pay: Math.max(0, ps.net_pay - imprest_deduct), advance_ids: advances.map(a => a.id) });
+          entries.push({ ...ps, employee_id: e.id, id: uuid(), imprest_deduct, net_pay: Math.max(0, ps.net_pay - imprest_deduct), advance_ids: advances.map(a => a.id), overtime_ids: ot.map(o => o.id) });
         }
 
         const totals = entries.reduce((acc, e) => {
           acc.gross  += e.gross_pay; acc.paye += e.paye; acc.nhif += e.nhif;
           acc.nssf += e.nssf; acc.housing += e.housing_levy; acc.net += e.net_pay;
-          acc.imprest += e.imprest_deduct;
+          acc.imprest += e.imprest_deduct; acc.helb += e.helb; acc.overtime += e.overtime;
           return acc;
-        }, { gross: 0, paye: 0, nhif: 0, nssf: 0, housing: 0, net: 0, imprest: 0 });
+        }, { gross: 0, paye: 0, nhif: 0, nssf: 0, housing: 0, net: 0, imprest: 0, helb: 0, overtime: 0 });
+
+        // HR-008: cut-off on the 20th; pay on the last day of the period.
+        const cutoff_date = `${period}-20`;
+        const [yy, mm] = period.split('-').map(Number);
+        const pay_date = new Date(Date.UTC(yy, mm, 0)).toISOString().split('T')[0]; // last day of month (UTC-safe)
 
         const runId = uuid();
         await transaction(async ({ run: dbRun }) => {
           await dbRun(
-            `INSERT INTO payroll_runs (id,period,status,total_gross,total_paye,total_nhif,total_nssf,total_housing,total_net)
-             VALUES (?,?,?,?,?,?,?,?,?)`,
-            [runId, period, 'draft', totals.gross, totals.paye, totals.nhif, totals.nssf, totals.housing, totals.net]
+            `INSERT INTO payroll_runs (id,period,status,total_gross,total_paye,total_nhif,total_nssf,total_housing,total_net,cutoff_date,pay_date)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            [runId, period, 'draft', totals.gross, totals.paye, totals.nhif, totals.nssf, totals.housing, totals.net, cutoff_date, pay_date]
           );
           for (const e of entries) {
             await dbRun(
-              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,imprest_deduct,net_pay)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.imprest_deduct||0, e.net_pay]
+              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,helb,overtime,imprest_deduct,net_pay)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.helb||0, e.overtime||0, e.imprest_deduct||0, e.net_pay]
             );
-            // Mark recovered advances against this run so they aren't deducted twice.
             for (const advId of e.advance_ids) {
               await dbRun(`UPDATE imprest SET status='deducted', deducted_in_run=?, deducted_at=datetime('now') WHERE id=?`, [runId, advId]);
+            }
+            for (const otId of e.overtime_ids) {
+              await dbRun(`UPDATE overtime SET status='paid', paid_in_run=? WHERE id=?`, [runId, otId]);
             }
           }
         });
 
-        return ok({ run_id: runId, period, entries_count: entries.length, totals, advances_recovered: totals.imprest }, 201);
+        return ok({ run_id: runId, period, entries_count: entries.length, totals, cutoff_date, pay_date }, 201);
       }
 
       // ── Sign payroll ──────────────────────────────────────────────────────
