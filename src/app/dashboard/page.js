@@ -159,6 +159,7 @@ function Tabs({ tabs, active, setActive }) {
 // ── NAV MODULES ──────────────────────────────────────────────────────────────
 const MODULES = [
   {id:'dashboard', label:'Dashboard',         icon:'📊', group:'overview'},
+  {id:'me',        label:'My Workspace',       icon:'🙋', group:'overview'},
   {id:'finance',   label:'Finance',           icon:'💰', group:'core'},
   {id:'debtors',   label:'Debtors',           icon:'📋', group:'core'},
   {id:'tax',       label:'Tax & KRA',         icon:'🏛️', group:'core'},
@@ -216,7 +217,8 @@ function modulesForRole(role) {
   if (role === 'md' || role === 'admin') return MODULES;
   const allowed = ROLE_MODULES[role];
   if (!allowed) return MODULES; // unknown/legacy role — fail open rather than lock someone out entirely
-  return MODULES.filter(m => allowed.includes(m.id));
+  // 'me' (My Workspace) and 'dashboard' are available to every role.
+  return MODULES.filter(m => m.id === 'me' || allowed.includes(m.id));
 }
 const GROUPS={overview:'Overview',core:'Core Modules',ops:'Operations',commercial:'Commercial',governance:'Governance'};
 
@@ -3646,6 +3648,126 @@ function CalibrationModule({ api }) {
   </div>);
 }
 
+// ── MY WORKSPACE — Employee Self-Service (RPT-018) ──────────────────────────────
+function MyWorkspace({ api, user }) {
+  const [tab,setTab]=useState('overview');
+  const [ov,setOv]=useState(null);
+  const [leave,setLeave]=useState({leave_balance:0,requests:[]});
+  const [payslips,setPayslips]=useState([]);
+  const [tasks,setTasks]=useState([]);
+  const [att,setAtt]=useState({today:null,recent:[]});
+  const [loading,setLoading]=useState(false);
+  const [modal,setModal]=useState(null);
+  const [msg,setMsg]=useState(null);
+  const [lvForm,setLvForm]=useState({leave_type:'annual',start_date:'',end_date:'',reason:''});
+  const [pwForm,setPwForm]=useState({current_password:'',new_password:'',confirm:''});
+
+  const load=async(t=tab)=>{
+    setLoading(true);
+    if(t==='overview'){const r=await api.get('/api/me?section=overview');if(r?.success)setOv(r.data);}
+    if(t==='leave'){const r=await api.get('/api/me?section=leave');if(r?.success)setLeave(r.data);}
+    if(t==='payslips'){const r=await api.get('/api/me?section=payslips');if(r?.success)setPayslips(r.data);}
+    if(t==='tasks'){const r=await api.get('/api/me?section=tasks');if(r?.success)setTasks(r.data);}
+    if(t==='attendance'){const r=await api.get('/api/me?section=attendance');if(r?.success)setAtt(r.data);}
+    setLoading(false);
+  };
+  useEffect(()=>{load();},[tab]);
+
+  const applyLeave=async()=>{ if(!lvForm.start_date||!lvForm.end_date)return; const r=await api.post('/api/me',{action:'apply_leave',...lvForm}); if(r?.success){setMsg({type:'success',text:`Leave applied — ${r.data.days} day(s), pending approval`});setModal(null);setLvForm({leave_type:'annual',start_date:'',end_date:'',reason:''});load('leave');} else setMsg({type:'error',text:r?.error}); };
+  const clock=async(which)=>{ const r=await api.post('/api/me',{action:which}); if(r?.success)setMsg({type:'success',text:which==='clock_in'?`Clocked in${r.data.is_late?' (late)':''}`:`Clocked out — ${r.data.hours_worked}h`}); else setMsg({type:'error',text:r?.error}); load('attendance'); };
+  const completeTask=async(id)=>{ const r=await api.post('/api/me',{action:'complete_task',task_id:id}); if(r?.success){setMsg({type:'success',text:'Task completed'});load('tasks');} else setMsg({type:'error',text:r?.error}); };
+  const changePw=async()=>{ if(pwForm.new_password!==pwForm.confirm){setMsg({type:'error',text:'Passwords do not match'});return;} const r=await api.post('/api/me',{action:'change_password',current_password:pwForm.current_password,new_password:pwForm.new_password}); if(r?.success){setMsg({type:'success',text:'Password changed'});setPwForm({current_password:'',new_password:'',confirm:''});} else setMsg({type:'error',text:r?.error}); };
+  const downloadPayslip=async(period)=>{ const token=typeof window!=='undefined'?localStorage.getItem('qsl_token'):null; const res=await fetch(`/api/me?section=payslip_pdf&period=${period}`,{headers:{Authorization:`Bearer ${token}`}}); if(!res.ok){setMsg({type:'error',text:'Payslip not available'});return;} const blob=await res.blob(); window.open(URL.createObjectURL(blob),'_blank'); };
+
+  return(<div>
+    {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
+    <div style={{marginBottom:14}}><h2 style={{fontSize:18,fontWeight:700,color:'var(--brand, #1B3A5C)',margin:0}}>Welcome, {user?.name||'Colleague'} 👋</h2><p style={{fontSize:12,color:T.mgrey,margin:0}}>Your personal workspace — leave, payslips, tasks and attendance.</p></div>
+    <Tabs tabs={[{id:'overview',label:'Overview'},{id:'leave',label:'Leave'},{id:'payslips',label:'Payslips'},{id:'tasks',label:'My Tasks'},{id:'attendance',label:'Attendance'},{id:'account',label:'Account'}]} active={tab} setActive={t=>setTab(t)}/>
+    {loading&&<Loading/>}
+
+    {!loading&&tab==='overview'&&ov&&(<>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
+        <Stat label="Leave Balance" value={`${ov.employee?.leave_balance??0} days`} icon="🏖️" variant="green"/>
+        <Stat label="L&D Hours" value={`${ov.employee?.l_and_d_hours||0} / ${ov.ld_target}`} icon="📚" variant={(ov.employee?.l_and_d_hours||0)<ov.ld_target?'amber':'green'}/>
+        <Stat label="Open Tasks" value={ov.open_tasks} icon="☑️" variant={ov.open_tasks?'amber':'green'}/>
+        <Stat label="Avg KPI" value={ov.kpi_avg?ov.kpi_avg.toFixed(1):'—'} icon="⭐"/>
+      </div>
+      <Card>
+        <SectionHeader title="My Profile"/>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
+          {[['Employee No',ov.employee?.emp_no],['Department',ov.employee?.department],['Role',ov.employee?.role],['Pending Leave',`${ov.pending_leave} request(s)`]].map(([l,v])=>(
+            <div key={l} style={{padding:'8px 10px',background:T.offwt,borderRadius:6}}><div style={{fontSize:10,color:T.mgrey,textTransform:'uppercase'}}>{l}</div><div style={{fontSize:13,fontWeight:600,color:T.navy}}>{v||'—'}</div></div>
+          ))}
+        </div>
+      </Card>
+    </>)}
+
+    {!loading&&tab==='leave'&&(<>
+      <SectionHeader title="My Leave" sub={`Balance: ${leave.leave_balance} days`} action={<Btn size="sm" onClick={()=>setModal('leave')}>+ Apply for Leave</Btn>}/>
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Type','From','To','Days','Status']} empty="No leave requests yet."
+          rows={leave.requests.map(r=>[<span style={{textTransform:'capitalize'}}>{r.leave_type}</span>,fmt.date(r.start_date),fmt.date(r.end_date),r.days,
+            <Badge variant={r.status==='approved'?'green':r.status==='rejected'?'red':'amber'}>{r.status}</Badge>])}/>
+      </Card>
+    </>)}
+
+    {!loading&&tab==='payslips'&&(<>
+      <SectionHeader title="My Payslips" sub="Finalised payroll runs"/>
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Period','Gross','Net Pay','Pay Date','']} empty="No finalised payslips yet."
+          rows={payslips.map(p=>[<strong>{p.period}</strong>,fmt.kes(p.gross_pay),<strong style={{color:T.green}}>{fmt.kes(p.net_pay)}</strong>,fmt.date(p.pay_date),
+            <Btn size="sm" variant="ghost" onClick={()=>downloadPayslip(p.period)}>⬇ PDF</Btn>])}/>
+      </Card>
+    </>)}
+
+    {!loading&&tab==='tasks'&&(
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Task','Priority','Due','Status','']} empty="No tasks assigned to you."
+          rows={tasks.map(t=>[<strong>{t.title}</strong>,<Badge variant={t.priority==='critical'?'red':t.priority==='high'?'amber':'blue'}>{t.priority}</Badge>,fmt.date(t.due_date),
+            <Badge variant={t.status==='completed'?'green':'amber'}>{t.status}</Badge>,
+            t.status!=='completed'?<Btn size="sm" onClick={()=>completeTask(t.id)}>✓ Done</Btn>:'✓'])}/>
+      </Card>
+    )}
+
+    {!loading&&tab==='attendance'&&(<>
+      <SectionHeader title="My Attendance" action={
+        <div style={{display:'flex',gap:8}}>
+          {!att.today?<Btn size="sm" onClick={()=>clock('clock_in')}>Clock In</Btn>
+            :!att.today.clock_out?<Btn size="sm" variant="gold" onClick={()=>clock('clock_out')}>Clock Out</Btn>
+            :<Badge variant="green">Done for today</Badge>}
+        </div>}/>
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Date','In','Out','Hours','Late?']} empty="No attendance records."
+          rows={att.recent.map(a=>[fmt.date(a.date),a.clock_in?new Date(a.clock_in).toLocaleTimeString():'—',a.clock_out?new Date(a.clock_out).toLocaleTimeString():'—',a.hours_worked?`${a.hours_worked}h`:'—',
+            a.is_late?<Badge variant="red">late</Badge>:<Badge variant="green">on time</Badge>])}/>
+      </Card>
+    </>)}
+
+    {!loading&&tab==='account'&&(
+      <Card style={{maxWidth:440}}>
+        <SectionHeader title="Change Password" sub="Use your own secure password"/>
+        <Input label="Current Password" type="password" value={pwForm.current_password} onChange={v=>setPwForm({...pwForm,current_password:v})}/>
+        <Input label="New Password" type="password" value={pwForm.new_password} onChange={v=>setPwForm({...pwForm,new_password:v})} note="At least 8 characters"/>
+        <Input label="Confirm New Password" type="password" value={pwForm.confirm} onChange={v=>setPwForm({...pwForm,confirm:v})}/>
+        <Btn size="sm" onClick={changePw} disabled={!pwForm.new_password} style={{marginTop:8}}>Update Password</Btn>
+      </Card>
+    )}
+
+    {modal==='leave'&&(
+      <Modal title="Apply for Leave (HR-005)" onClose={()=>setModal(null)} width={460}>
+        <Select label="Leave Type" value={lvForm.leave_type} onChange={v=>setLvForm({...lvForm,leave_type:v})}
+          options={[{value:'annual',label:'Annual'},{value:'sick',label:'Sick'},{value:'maternity',label:'Maternity/Paternity'},{value:'compassionate',label:'Compassionate'},{value:'unpaid',label:'Unpaid'}]}/>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="From" type="date" value={lvForm.start_date} onChange={v=>setLvForm({...lvForm,start_date:v})} required/>
+          <Input label="To" type="date" value={lvForm.end_date} onChange={v=>setLvForm({...lvForm,end_date:v})} required/>
+        </div>
+        <Input label="Reason" value={lvForm.reason} onChange={v=>setLvForm({...lvForm,reason:v})}/>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={applyLeave} disabled={!lvForm.start_date||!lvForm.end_date}>Submit</Btn></div>
+      </Modal>
+    )}
+  </div>);
+}
+
 // ── INSPECTION BODY MODULE (ISO/IEC 17020) ─────────────────────────────────────
 function InspectionModule({ api, user }) {
   const [tab,setTab]=useState('register');
@@ -4568,6 +4690,7 @@ export default function Dashboard() {
   const renderModule = () => {
     switch(active) {
       case 'dashboard':    return <DashboardHome api={api} setActive={setActive}/>;
+      case 'me':           return <MyWorkspace api={api} user={user}/>;
       case 'finance':      return <Finance api={api}/>;
       case 'tax':          return <TaxModule api={api}/>;
       case 'projects':     return <Projects api={api}/>;
