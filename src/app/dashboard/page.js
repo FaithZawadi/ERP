@@ -1625,12 +1625,25 @@ function HR({ api }) {
   const [msg,setMsg]=useState(null);
   const [helbForm,setHelbForm]=useState({employee_id:'',helb_monthly:''});
   const [otForm,setOtForm]=useState({employee_id:'',period:'2026-06',weekday_hours:'',holiday_hours:''});
+  // People workflows — HR-013/020/025
+  const [increments,setIncrements]=useState([]);
+  const [disciplinary,setDisciplinary]=useState([]);
+  const [discDetail,setDiscDetail]=useState(null);
+  const [ldComp,setLdComp]=useState(null);
+  const [incForm,setIncForm]=useState({employee_id:'',proposed_salary:'',effective_month:'2026-09',reason:''});
+  const [discForm,setDiscForm]=useState({employee_id:'',incident_desc:''});
+  const [advForm,setAdvForm]=useState({step:'',notes:''});
 
   const load = async (t=tab) => {
     setLoading(true);
     if(t==='employees') { const r=await api.get('/api/hr?section=employees'); if(r?.success) setEmployees(r.data); }
     if(t==='attendance') { const r=await api.get('/api/hr?section=attendance'); if(r?.success) setAttendance(r.data); }
     if(t==='kpi') { const r=await api.get('/api/hr?section=kpi_summary'); if(r?.success) setKpi(r.data); }
+    if(t==='people') {
+      const [inc,dis,ld]=await Promise.all([api.get('/api/hr?section=increments'),api.get('/api/hr?section=disciplinary'),api.get('/api/hr?section=ld_compliance')]);
+      if(inc?.success)setIncrements(inc.data); if(dis?.success)setDisciplinary(dis.data); if(ld?.success)setLdComp(ld.data);
+    }
+    if((t==='employees'||t==='people')&&employees.length===0){ const r=await api.get('/api/hr?section=employees'); if(r?.success)setEmployees(r.data); }
     setLoading(false);
   };
 
@@ -1652,11 +1665,55 @@ function HR({ api }) {
   const setHelb = async () => { if(!helbForm.employee_id)return; const r=await api.post('/api/hr',{action:'set_helb',employee_id:helbForm.employee_id,helb_monthly:parseFloat(helbForm.helb_monthly||0)}); if(r?.success){setMsg({type:'success',text:'HELB monthly deduction saved'});setHelbForm({employee_id:'',helb_monthly:''});load('employees');} else setMsg({type:'error',text:r?.error}); };
   const logOvertime = async () => { if(!otForm.employee_id||!otForm.period)return; const r=await api.post('/api/hr',{action:'log_overtime',...otForm,weekday_hours:parseFloat(otForm.weekday_hours||0),holiday_hours:parseFloat(otForm.holiday_hours||0)}); if(r?.success){setMsg({type:'success',text:`Overtime logged — ${fmt.kes(r.data.total)} (1.5×/2×)`});setOtForm({employee_id:'',period:otForm.period,weekday_hours:'',holiday_hours:''});} else setMsg({type:'error',text:r?.error}); };
 
+  // People workflows — HR-013/020/025
+  const proposeIncrement = async () => { if(!incForm.employee_id||!incForm.proposed_salary)return; const r=await api.post('/api/hr',{action:'propose_increment',...incForm,proposed_salary:parseFloat(incForm.proposed_salary)}); if(r?.success){setMsg({type:r.data.blocked?'warning':'success',text:r.data.blocked?`Proposed but BLOCKED (training shortfall)`:`Increment proposed (${r.data.increment_pct}%)`});setModal(null);setIncForm({employee_id:'',proposed_salary:'',effective_month:'2026-09',reason:''});load('people');} else setMsg({type:'error',text:r?.error}); };
+  const incAction = async (action,id) => { const r=await api.post('/api/hr',{action,id,signature_key:`QSL-DS-${Date.now()}`}); if(r?.success){setMsg({type:'success',text:'Done'});load('people');} else setMsg({type:'error',text:r?.error}); };
+  const createDisciplinary = async () => { if(!discForm.employee_id||!discForm.incident_desc)return; const r=await api.post('/api/hr',{action:'create_disciplinary',...discForm}); if(r?.success){setMsg({type:'success',text:`Case ${r.data.case_no} opened`});setModal(null);setDiscForm({employee_id:'',incident_desc:''});load('people');} else setMsg({type:'error',text:r?.error}); };
+  const openDisc = async (id) => { const r=await api.get(`/api/hr?section=disciplinary_detail&id=${id}`); if(r?.success){setDiscDetail(r.data); const order=r.data.stage_order; const next=order[order.indexOf(r.data.case.stage)+1]||''; setAdvForm({step:next,notes:''});} };
+  const advanceDisc = async () => { if(!advForm.step)return; const r=await api.post('/api/hr',{action:'advance_disciplinary',id:discDetail.case.id,step:advForm.step,notes:advForm.notes}); if(r?.success){setMsg({type:'success',text:`${advForm.step} recorded${r.data.closed?' — case closed':''}`});setDiscDetail(null);load('people');} else setMsg({type:'error',text:r?.error}); };
+  const sendLdAlerts = async () => { const r=await api.post('/api/hr',{action:'send_ld_alerts'}); if(r?.success)setMsg({type:'success',text:`${r.data.alerts_raised} L&D alerts raised to HR`}); };
+
   return (
     <div>
       {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'},{id:'payroll_inputs',label:'Payroll Inputs'}]} active={tab} setActive={t=>{setTab(t);}}/>
+      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'},{id:'payroll_inputs',label:'Payroll Inputs'},{id:'people',label:'Increments & Discipline'}]} active={tab} setActive={t=>{setTab(t);}}/>
       {loading&&<Loading/>}
+
+      {!loading&&tab==='people'&&(<>
+        <Alert type="info"><strong>HR-013/026:</strong> HR proposes increments → MD approves; auto-blocked if L&D &lt; 40h until the HR Head clears it. <strong>HR-020:</strong> disciplinary cases progress incident → investigation → show cause → hearing → outcome, each signed.</Alert>
+
+        <SectionHeader title="Salary Increments (HR-013)" action={<Btn size="sm" onClick={()=>setModal('increment')}>+ Propose</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['Employee','Current','Proposed','%','Effective','Status','Action']} empty="No increment proposals."
+            rows={increments.map(i=>[
+              <strong>{i.employee_name}</strong>, fmt.kes(i.current_salary), fmt.kes(i.proposed_salary),
+              <span>{i.increment_pct}%</span>, i.effective_month||'—',
+              <Badge variant={i.status==='md_approved'?'green':i.status==='blocked'?'red':i.status==='rejected'?'default':'amber'}>{i.status}{i.status==='blocked'?' 🔒':''}</Badge>,
+              i.status==='blocked'?<Btn size="sm" variant="ghost" onClick={()=>incAction('clear_increment_block',i.id)}>Clear Block</Btn>
+              :i.status==='proposed'?<div style={{display:'flex',gap:4}}><Btn size="sm" onClick={()=>incAction('approve_increment',i.id)}>MD Approve</Btn><Btn size="sm" variant="ghost" onClick={()=>incAction('reject_increment',i.id)}>Reject</Btn></div>
+              :'—',
+            ])}/>
+        </Card>
+
+        <SectionHeader title="Disciplinary Cases (HR-020)" action={<Btn size="sm" onClick={()=>setModal('disciplinary')}>+ New Case</Btn>}/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['Case','Employee','Incident','Stage','Status','']} empty="No disciplinary cases."
+            rows={disciplinary.map(d=>[<span style={{fontFamily:'monospace',fontSize:11}}>{d.case_no}</span>,<strong>{d.employee_name}</strong>,
+              <span style={{fontSize:12}}>{(d.incident_desc||'').slice(0,40)}</span>,<Badge variant="navy">{d.stage}</Badge>,
+              <Badge variant={d.status==='closed'?'green':'amber'}>{d.status}</Badge>,
+              <Btn size="sm" variant="ghost" onClick={()=>openDisc(d.id)}>Open</Btn>])}/>
+        </Card>
+
+        {ldComp&&(
+          <Card>
+            <SectionHeader title="L&D Compliance (HR-025)" sub={`${ldComp.is_q3?'Q3 — alerts active':'pre-Q3'} · 40h annual target`}
+              action={<Btn size="sm" variant="ghost" onClick={sendLdAlerts}>Raise HR alerts</Btn>}/>
+            <DataTable headers={['Employee','Dept','L&D Hours','Status']} empty="—"
+              rows={ldComp.employees.map(e=>[<strong>{e.name}</strong>,e.department,`${e.l_and_d_hours||0} / ${e.target}`,
+                e.below_target?<Badge variant={e.q3_alert?'red':'amber'}>{e.q3_alert?'Q3 ALERT':'below'}</Badge>:<Badge variant="green">on target</Badge>])}/>
+          </Card>
+        )}
+      </>)}
 
       {!loading&&tab==='payroll_inputs'&&(
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
@@ -1758,6 +1815,49 @@ function HR({ api }) {
             <Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn>
             <Btn onClick={createEmployee} disabled={!form.first_name||!form.last_name||!form.email}>Save Employee</Btn>
           </div>
+        </Modal>
+      )}
+
+      {modal==='increment'&&(
+        <Modal title="Propose Salary Increment (HR-013)" onClose={()=>setModal(null)} width={500}>
+          <Alert type="info">Auto-blocked if the employee's L&D is below 40h (HR-026); the HR Head must clear it before MD approval.</Alert>
+          <Select label="Employee" value={incForm.employee_id} onChange={v=>setIncForm({...incForm,employee_id:v})} required options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name} — ${fmt.kes(e.basic_salary)} · L&D ${e.l_and_d_hours||0}h`}))]}/>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+            <Input label="Proposed Salary" type="number" value={incForm.proposed_salary} onChange={v=>setIncForm({...incForm,proposed_salary:v})} required/>
+            <Input label="Effective Month" value={incForm.effective_month} onChange={v=>setIncForm({...incForm,effective_month:v})} placeholder="YYYY-MM"/>
+          </div>
+          <Input label="Reason" value={incForm.reason} onChange={v=>setIncForm({...incForm,reason:v})}/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={proposeIncrement} disabled={!incForm.employee_id||!incForm.proposed_salary}>Propose</Btn></div>
+        </Modal>
+      )}
+
+      {modal==='disciplinary'&&(
+        <Modal title="New Disciplinary Case (HR-020)" onClose={()=>setModal(null)} width={500}>
+          <Select label="Employee" value={discForm.employee_id} onChange={v=>setDiscForm({...discForm,employee_id:v})} required options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>
+          <Input label="Incident Description" value={discForm.incident_desc} onChange={v=>setDiscForm({...discForm,incident_desc:v})} required/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createDisciplinary} disabled={!discForm.employee_id||!discForm.incident_desc}>Open Case</Btn></div>
+        </Modal>
+      )}
+
+      {discDetail&&(
+        <Modal title={`${discDetail.case.case_no} — ${discDetail.case.employee_name}`} onClose={()=>setDiscDetail(null)} width={560}>
+          <div style={{fontSize:12,color:T.mgrey,marginBottom:8}}>{discDetail.case.incident_desc}</div>
+          <div style={{display:'flex',gap:4,marginBottom:12,flexWrap:'wrap'}}>
+            {discDetail.stage_order.map(s=><Badge key={s} variant={discDetail.steps.some(st=>st.step===s)?'green':discDetail.case.stage===s?'amber':'default'}>{s}</Badge>)}
+          </div>
+          {discDetail.steps.map(s=>(
+            <div key={s.id} style={{padding:'7px 0',borderBottom:`1px solid ${T.offwt}`,fontSize:12}}>
+              <strong style={{textTransform:'capitalize'}}>{s.step.replace('_',' ')}</strong> {s.sig&&<span style={{color:T.green}}>🔐</span>} <span style={{color:T.mgrey}}>· {fmt.date(s.created_at)} · {s.signed_by_name}</span>
+              {s.notes&&<div style={{color:T.dgrey,marginTop:2}}>{s.notes}</div>}
+            </div>
+          ))}
+          {discDetail.case.status!=='closed'&&advForm.step&&(
+            <div style={{marginTop:14,padding:'10px',background:T.offwt,borderRadius:8}}>
+              <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>Next step: <span style={{texttransform:'capitalize'}}>{advForm.step.replace('_',' ')}</span></div>
+              <Input label="Notes" value={advForm.notes} onChange={v=>setAdvForm({...advForm,notes:v})}/>
+              <Btn size="sm" onClick={advanceDisc} style={{marginTop:6}}>Record & Sign {advForm.step.replace('_',' ')}</Btn>
+            </div>
+          )}
         </Modal>
       )}
     </div>

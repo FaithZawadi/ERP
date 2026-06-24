@@ -203,6 +203,50 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
+-- Salary increment workflow (HR-013): HR proposes → MD approves → effective
+-- from the stated month. Auto-blocked if the L&D target isn't met until the
+-- HR Head clears it (HR-026).
+CREATE TABLE IF NOT EXISTS salary_increments (
+  id              TEXT PRIMARY KEY,
+  employee_id     TEXT REFERENCES employees(id),
+  current_salary  REAL,
+  proposed_salary REAL NOT NULL,
+  increment_pct   REAL,
+  effective_month TEXT,                     -- YYYY-MM
+  reason          TEXT,
+  status          TEXT DEFAULT 'proposed',   -- proposed | blocked | md_approved | rejected
+  blocked_reason  TEXT,
+  proposed_by     TEXT REFERENCES employees(id),
+  block_cleared_by TEXT REFERENCES employees(id),
+  approved_by     TEXT REFERENCES employees(id),
+  approved_sig    TEXT,
+  approved_at     TEXT,
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Disciplinary workflow (HR-020): incident → investigation → show cause →
+-- hearing → outcome. Each step is timestamped and digitally signed (steps table).
+CREATE TABLE IF NOT EXISTS disciplinary_cases (
+  id            TEXT PRIMARY KEY,
+  case_no       TEXT UNIQUE NOT NULL,
+  employee_id   TEXT REFERENCES employees(id),
+  incident_desc TEXT NOT NULL,
+  stage         TEXT DEFAULT 'incident',     -- incident|investigation|show_cause|hearing|outcome|closed
+  status        TEXT DEFAULT 'open',          -- open | closed
+  outcome       TEXT,
+  reported_by   TEXT REFERENCES employees(id),
+  created_at    TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS disciplinary_steps (
+  id          TEXT PRIMARY KEY,
+  case_id     TEXT REFERENCES disciplinary_cases(id),
+  step        TEXT NOT NULL,
+  notes       TEXT,
+  signed_by   TEXT REFERENCES employees(id),
+  sig         TEXT,
+  created_at  TEXT DEFAULT (datetime('now'))
+);
+
 -- Overtime records (HR-012): 1.5× weekday, 2× Sunday/holiday; approved
 -- overtime is added to gross in the next payroll run.
 CREATE TABLE IF NOT EXISTS overtime (

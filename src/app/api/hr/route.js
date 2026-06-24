@@ -2,9 +2,25 @@
 
 import { NextResponse } from 'next/server';
 import { v4 as uuid }   from 'uuid';
-import { requireAuth, ok, err, logAudit } from '../../../lib/auth';
+import { requireAuth, ok, err, logAudit, createApprovalRecord } from '../../../lib/auth';
 import { query, queryOne, run } from '../../../lib/db';
 import { calculatePayslip, calculateOvertime } from '../../../lib/tax';
+
+// Apply the caller's RSA-2048 signature to a document ref (disciplinary steps).
+async function signAs(auth, documentRef, action) {
+  const sig = await queryOne(
+    `SELECT ds.key_id, ds.private_key FROM digital_signatures ds
+     JOIN users u ON ds.user_id=u.id WHERE u.employee_id=? AND ds.is_active=1`, [auth.user.employee_id]
+  );
+  if (!sig) return null;
+  const approval = createApprovalRecord(auth.user.employee_id, auth.user.name, sig.key_id, sig.private_key, documentRef, action);
+  await run(`UPDATE digital_signatures SET uses=uses+1 WHERE key_id=?`, [sig.key_id]);
+  return JSON.stringify({ key_id: approval.keyId, signature: approval.signature, timestamp: approval.timestamp });
+}
+
+const LD_TARGET = 40; // annual L&D hours (HR-025)
+const DISC_STAGES = ['incident', 'investigation', 'show_cause', 'hearing', 'outcome']; // HR-020 order
+const HR_HEAD_ROLES = ['hr_manager', 'md', 'admin'];
 
 export async function GET(req) {
   const auth = await requireAuth(req);
@@ -71,6 +87,47 @@ export async function GET(req) {
            WHERE e.status='active' GROUP BY e.id`, [`${period}%`]
         );
         return ok(rows);
+      }
+
+      // ── HR-013: salary increment proposals ──────────────────────────────
+      case 'increments': {
+        const rows = await query(
+          `SELECT si.*, e.first_name||' '||e.last_name as employee_name, e.l_and_d_hours,
+                  p.first_name||' '||p.last_name as proposed_by_name
+           FROM salary_increments si
+           LEFT JOIN employees e ON si.employee_id=e.id
+           LEFT JOIN employees p ON si.proposed_by=p.id
+           ORDER BY si.created_at DESC`
+        );
+        return ok(rows);
+      }
+
+      // ── HR-020: disciplinary cases (+ steps on detail) ───────────────────
+      case 'disciplinary': {
+        const rows = await query(
+          `SELECT d.*, e.first_name||' '||e.last_name as employee_name
+           FROM disciplinary_cases d LEFT JOIN employees e ON d.employee_id=e.id
+           ORDER BY d.created_at DESC`
+        );
+        return ok(rows);
+      }
+      case 'disciplinary_detail': {
+        if (!id) return err('id required', 400);
+        const c = await queryOne(`SELECT d.*, e.first_name||' '||e.last_name as employee_name FROM disciplinary_cases d LEFT JOIN employees e ON d.employee_id=e.id WHERE d.id=?`, [id]);
+        if (!c) return err('Case not found', 404);
+        const steps = await query(`SELECT s.*, e.first_name||' '||e.last_name as signed_by_name FROM disciplinary_steps s LEFT JOIN employees e ON s.signed_by=e.id WHERE s.case_id=? ORDER BY s.created_at`, [id]);
+        return ok({ case: c, steps, stage_order: DISC_STAGES });
+      }
+
+      // ── HR-025: L&D compliance vs the 40-hour target (Q3 alert) ──────────
+      case 'ld_compliance': {
+        const month = new Date().getMonth() + 1; // 1-12
+        const isQ3 = month >= 7;
+        const rows = await query(
+          `SELECT id, first_name||' '||last_name as name, department, l_and_d_hours FROM employees WHERE status='active' ORDER BY l_and_d_hours`
+        );
+        const data = rows.map(r => ({ ...r, target: LD_TARGET, below_target: (r.l_and_d_hours||0) < LD_TARGET, q3_alert: isQ3 && (r.l_and_d_hours||0) < LD_TARGET }));
+        return ok({ is_q3: isQ3, target: LD_TARGET, employees: data });
       }
 
       default:
@@ -223,19 +280,112 @@ export async function POST(req) {
       }
 
       case 'log_l_and_d': {
-        const { employee_id, course_name, provider, hours, date } = body;
+        const { employee_id, course_name, provider, hours, date, certificate } = body;
         if (!employee_id || !course_name || !hours) return err('employee_id, course_name, hours required', 400);
 
         const id = uuid();
+        // HR-027: training record with date, provider, hours and certificate.
         await run(
-          `INSERT INTO l_and_d (id,employee_id,course_name,provider,hours,date,approved_by) VALUES (?,?,?,?,?,?,?)`,
-          [id, employee_id, course_name, provider, hours, date || new Date().toISOString().split('T')[0], auth.user.employee_id]
+          `INSERT INTO l_and_d (id,employee_id,course_name,provider,hours,date,certificate,approved_by) VALUES (?,?,?,?,?,?,?,?)`,
+          [id, employee_id, course_name, provider, hours, date || new Date().toISOString().split('T')[0], certificate || null, auth.user.employee_id]
         );
-
-        // Update running total
         await run(`UPDATE employees SET l_and_d_hours=l_and_d_hours+? WHERE id=?`, [hours, employee_id]);
-
         return ok({ id, hours_added: hours }, 201);
+      }
+
+      // ── HR-013/026: HR proposes a salary increment (blocked if L&D < target)
+      case 'propose_increment': {
+        const { employee_id, proposed_salary, effective_month, reason } = body;
+        if (!employee_id || !proposed_salary) return err('employee_id and proposed_salary required', 400);
+        const emp = await queryOne(`SELECT basic_salary, l_and_d_hours FROM employees WHERE id=?`, [employee_id]);
+        if (!emp) return err('Employee not found', 404);
+        const pct = emp.basic_salary ? Math.round((proposed_salary - emp.basic_salary) / emp.basic_salary * 1000) / 10 : 0;
+        const blocked = (emp.l_and_d_hours || 0) < LD_TARGET;
+        const id = uuid();
+        await run(
+          `INSERT INTO salary_increments (id,employee_id,current_salary,proposed_salary,increment_pct,effective_month,reason,status,blocked_reason,proposed_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          [id, employee_id, emp.basic_salary, proposed_salary, pct, effective_month, reason,
+           blocked ? 'blocked' : 'proposed',
+           blocked ? `HR-026: L&D ${emp.l_and_d_hours||0}h < ${LD_TARGET}h target — training block` : null,
+           auth.user.employee_id]
+        );
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'PROPOSE_INCREMENT', module: 'HR', recordId: id, newValue: { proposed_salary, pct, blocked } });
+        return ok({ id, status: blocked ? 'blocked' : 'proposed', increment_pct: pct, blocked }, 201);
+      }
+
+      // ── HR-026: HR Head clears a training block (only once L&D ≥ target) ─
+      case 'clear_increment_block': {
+        if (!HR_HEAD_ROLES.includes(auth.user.role)) return err('HR-026: only the HR Head (or MD) may clear a training block', 403);
+        const { id } = body;
+        const inc = await queryOne(`SELECT si.*, e.l_and_d_hours FROM salary_increments si JOIN employees e ON si.employee_id=e.id WHERE si.id=?`, [id]);
+        if (!inc) return err('Increment not found', 404);
+        if (inc.status !== 'blocked') return err('Increment is not blocked', 409);
+        if ((inc.l_and_d_hours || 0) < LD_TARGET) return err(`HR-026: L&D shortfall not resolved — ${inc.l_and_d_hours||0}h of ${LD_TARGET}h. Log the missing training first.`, 400);
+        await run(`UPDATE salary_increments SET status='proposed', block_cleared_by=? WHERE id=?`, [auth.user.employee_id, id]);
+        return ok({ cleared: true, status: 'proposed' });
+      }
+
+      // ── HR-013: MD approves a proposed increment → effective ─────────────
+      case 'approve_increment': {
+        if (!['md','admin'].includes(auth.user.role)) return err('HR-013: salary increments require MD approval', 403);
+        const { id, signature_key } = body;
+        const inc = await queryOne(`SELECT * FROM salary_increments WHERE id=?`, [id]);
+        if (!inc) return err('Increment not found', 404);
+        if (inc.status !== 'proposed') return err(`Cannot approve — status is ${inc.status}`, 409);
+        await run(`UPDATE salary_increments SET status='md_approved', approved_by=?, approved_sig=?, approved_at=datetime('now') WHERE id=?`,
+          [auth.user.employee_id, signature_key||`QSL-DS-md-${Date.now()}`, id]);
+        await run(`UPDATE employees SET basic_salary=? WHERE id=?`, [inc.proposed_salary, inc.employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'APPROVE_INCREMENT', module: 'HR', recordId: id, newValue: { proposed_salary: inc.proposed_salary, effective_month: inc.effective_month } });
+        return ok({ approved: true, effective_month: inc.effective_month });
+      }
+
+      case 'reject_increment': {
+        const { id } = body;
+        await run(`UPDATE salary_increments SET status='rejected' WHERE id=?`, [id]);
+        return ok({ rejected: true });
+      }
+
+      // ── HR-020: open a disciplinary case (incident report) ───────────────
+      case 'create_disciplinary': {
+        const { employee_id, incident_desc } = body;
+        if (!employee_id || !incident_desc) return err('employee_id and incident_desc required', 400);
+        const id = uuid(); const case_no = `DISC-${new Date().getFullYear()}-${String(Date.now()).slice(-4)}`;
+        await run(`INSERT INTO disciplinary_cases (id,case_no,employee_id,incident_desc,stage,reported_by) VALUES (?,?,?,?,'incident',?)`,
+          [id, case_no, employee_id, incident_desc, auth.user.employee_id]);
+        const sig = await signAs(auth, case_no, 'DISCIPLINARY_INCIDENT');
+        await run(`INSERT INTO disciplinary_steps (id,case_id,step,notes,signed_by,sig) VALUES (?,?, 'incident', ?, ?, ?)`,
+          [uuid(), id, incident_desc, auth.user.employee_id, sig]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_DISCIPLINARY', module: 'HR', recordId: id, newValue: { case_no } });
+        return ok({ id, case_no }, 201);
+      }
+
+      // ── HR-020: advance the case to the next stage (timestamped + signed) ─
+      case 'advance_disciplinary': {
+        const { id, step, notes } = body;
+        const c = await queryOne(`SELECT * FROM disciplinary_cases WHERE id=?`, [id]);
+        if (!c) return err('Case not found', 404);
+        const currentIdx = DISC_STAGES.indexOf(c.stage);
+        const targetIdx = DISC_STAGES.indexOf(step);
+        if (targetIdx !== currentIdx + 1) return err(`HR-020: steps must follow the sequence ${DISC_STAGES.join(' → ')}. Next allowed: ${DISC_STAGES[currentIdx+1]||'closed'}`, 400);
+        const sig = await signAs(auth, c.case_no, `DISCIPLINARY_${step.toUpperCase()}`);
+        await run(`INSERT INTO disciplinary_steps (id,case_id,step,notes,signed_by,sig) VALUES (?,?,?,?,?,?)`,
+          [uuid(), id, step, notes||'', auth.user.employee_id, sig]);
+        const isOutcome = step === 'outcome';
+        await run(`UPDATE disciplinary_cases SET stage=?, status=?, outcome=? WHERE id=?`,
+          [step, isOutcome ? 'closed' : 'open', isOutcome ? (notes||'') : c.outcome, id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: `DISCIPLINARY_${step.toUpperCase()}`, module: 'HR', recordId: id });
+        return ok({ advanced: true, stage: step, signed: !!sig, closed: isOutcome });
+      }
+
+      // ── HR-025: raise Q3 alerts (HR tasks) for staff below the L&D target ─
+      case 'send_ld_alerts': {
+        const below = await query(`SELECT id, first_name||' '||last_name as name, l_and_d_hours FROM employees WHERE status='active' AND l_and_d_hours < ?`, [LD_TARGET]);
+        for (const e of below) {
+          await run(`INSERT INTO tasks (id,title,assignee_id,due_date,priority,status,module,description) VALUES (?,?,?,date('now','+14 days'),'high','pending','HR',?)`,
+            [uuid(), `L&D below target — ${e.name}`, e.id, `HR-025: ${e.name} has ${e.l_and_d_hours||0}h of the ${LD_TARGET}h annual training target. Action needed before year-end.`]);
+        }
+        return ok({ alerts_raised: below.length });
       }
 
       // ── HR-012: log overtime (1.5× weekday, 2× Sunday/holiday) ───────────
