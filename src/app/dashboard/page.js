@@ -500,6 +500,18 @@ function Finance({ api }) {
   const [bForm,setBForm]=useState({department:'',cost_centre:'',annual_amount:''});
   const [tForm,setTForm]=useState({scope:'',annual_target:''});
   const [retireForm,setRetireForm]=useState({id:'',amount_accounted:'',receipt_path:''});
+  // Treasury & Statutory — FIN-004/009/010/024/025
+  const [fxRates,setFxRates]=useState([]);
+  const [forexReval,setForexReval]=useState({lines:[],total_impact:0});
+  const [creditors,setCreditors]=useState([]);
+  const [supplierRecon,setSupplierRecon]=useState([]);
+  const [remittance,setRemittance]=useState(null);
+  const [p9,setP9]=useState(null);
+  const [rateForm,setRateForm]=useState({currency:'USD',rate_to_kes:''});
+  const [reconForm,setReconForm]=useState({supplier_id:'',statement_balance:''});
+  const [remitPeriod,setRemitPeriod]=useState('2026-06');
+  const [p9Emp,setP9Emp]=useState('');
+  const [suppliers,setSuppliers]=useState([]);
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -517,6 +529,14 @@ function Finance({ api }) {
     if(t==='journals'){ const [j,a]=await Promise.all([api.get('/api/finance?section=journals'),api.get('/api/finance?section=accounts')]); if(j?.success)setJournals(j.data); if(a?.success)setAccounts(a.data); }
     if(t==='monthend'){ const [m,p]=await Promise.all([api.get(`/api/finance?section=month_end&period=${closePeriod}`),api.get(`/api/finance?section=pl_department&period=${closePeriod}`)]); if(m?.success)setMonthEnd(m.data); if(p?.success)setPlDept(p.data); }
     if(t==='budgets'){ const r=await api.get(`/api/finance?section=budget_dashboard&year=${budgetYear}`); if(r?.success)setBudgetData(r.data); }
+    if(t==='treasury'){
+      const [fx,rv,cr,sr,rm,sup]=await Promise.all([
+        api.get('/api/finance?section=fx_rates'), api.get('/api/finance?section=forex_revaluation'),
+        api.get('/api/finance?section=creditors_due'), api.get('/api/finance?section=supplier_recon'),
+        api.get(`/api/finance?section=remittance&period=${remitPeriod}`), api.get('/api/procurement?section=suppliers')]);
+      if(fx?.success)setFxRates(fx.data); if(rv?.success)setForexReval(rv.data); if(cr?.success)setCreditors(cr.data);
+      if(sr?.success)setSupplierRecon(sr.data); if(rm?.success)setRemittance(rm.data); if(sup?.success)setSuppliers(sup.data);
+    }
     setLoading(false);
   };
 
@@ -596,7 +616,13 @@ function Finance({ api }) {
   const createBudget = async () => { if(!bForm.department||!bForm.annual_amount)return; const r=await api.post('/api/finance',{action:'create_budget',fiscal_year:budgetYear,department:bForm.department,cost_centre:bForm.cost_centre,annual_amount:parseFloat(bForm.annual_amount)}); if(r?.success){setMsg({type:'success',text:'Budget saved'});setModal(null);setBForm({department:'',cost_centre:'',annual_amount:''});reloadBudgets(budgetYear);} else setMsg({type:'error',text:r?.error}); };
   const createTarget = async () => { if(!tForm.scope||!tForm.annual_target)return; const r=await api.post('/api/finance',{action:'create_revenue_target',fiscal_year:budgetYear,scope:tForm.scope,annual_target:parseFloat(tForm.annual_target)}); if(r?.success){setMsg({type:'success',text:'Revenue target saved'});setModal(null);setTForm({scope:'',annual_target:''});reloadBudgets(budgetYear);} else setMsg({type:'error',text:r?.error}); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'payauth',label:'Payment Authority'}];
+  // ── Treasury & Statutory handlers — FIN-004/009/010/024/025 ──
+  const setFxRate = async () => { if(!rateForm.rate_to_kes)return; const r=await api.post('/api/finance',{action:'set_fx_rate',currency:rateForm.currency,rate_to_kes:parseFloat(rateForm.rate_to_kes)}); if(r?.success){setMsg({type:'success',text:`${rateForm.currency} rate set`});setRateForm({currency:'USD',rate_to_kes:''});load('treasury');} else setMsg({type:'error',text:r?.error}); };
+  const reconcileSupplier = async () => { if(!reconForm.supplier_id||!reconForm.statement_balance)return; const r=await api.post('/api/finance',{action:'reconcile_supplier',supplier_id:reconForm.supplier_id,period:remitPeriod,statement_balance:parseFloat(reconForm.statement_balance)}); if(r?.success){setMsg({type:r.data.status==='variance'?'warning':'success',text:r.data.status==='variance'?`Variance ${fmt.kes(r.data.variance)} — escalated to FM`:'Reconciled'});setReconForm({supplier_id:'',statement_balance:''});load('treasury');} else setMsg({type:'error',text:r?.error}); };
+  const loadRemit = async (p) => { setRemitPeriod(p); const r=await api.get(`/api/finance?section=remittance&period=${p}`); if(r?.success)setRemittance(r.data); };
+  const loadP9 = async (emp) => { setP9Emp(emp); if(!emp){setP9(null);return;} const r=await api.get(`/api/finance?section=p9&employee_id=${emp}&year=2026`); if(r?.success)setP9(r.data); };
+
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -852,6 +878,74 @@ function Finance({ api }) {
               ),
             ])}/>
         </Card>
+      </>)}
+
+      {!loading&&tab==='treasury'&&(<>
+        <Alert type="info"><strong>FIN-004/009/010/024/025:</strong> multi-currency rates & month-end forex revaluation, supplier reconciliation, creditors due, and statutory remittance / P9.</Alert>
+
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18,marginBottom:18}}>
+          <Card>
+            <SectionHeader title="Exchange Rates (to KES)" sub="FIN-004"/>
+            <DataTable headers={['Currency','Rate','As of']} empty="No rates set."
+              rows={fxRates.map(r=>[<strong>{r.currency}</strong>,r.rate_to_kes,fmt.date(r.rate_date)])}/>
+            <div style={{display:'flex',gap:8,alignItems:'flex-end',marginTop:10}}>
+              <Select label="Currency" value={rateForm.currency} onChange={v=>setRateForm({...rateForm,currency:v})} options={[{value:'USD',label:'USD'},{value:'CNY',label:'CNY'}]}/>
+              <Input label="Rate to KES" type="number" value={rateForm.rate_to_kes} onChange={v=>setRateForm({...rateForm,rate_to_kes:v})}/>
+              <Btn size="sm" onClick={setFxRate}>Set</Btn>
+            </div>
+          </Card>
+          <Card>
+            <SectionHeader title="Month-End Forex Revaluation" sub="Open import LPOs — unrealised P&L impact"/>
+            <DataTable headers={['LPO','Cur','Booked→Now','Gain/Loss']} empty="No open foreign-currency LPOs."
+              rows={forexReval.lines.map(l=>[<span style={{fontFamily:'monospace',fontSize:11}}>{l.lpo_no}</span>,l.currency,`${l.booked_rate}→${l.current_rate}`,
+                <span style={{fontWeight:700,color:l.fx_gain_loss>=0?T.green:T.red}}>{fmt.kes(l.fx_gain_loss)}</span>])}/>
+            <div style={{marginTop:8,padding:'8px 10px',background:T.offwt,borderRadius:6,fontSize:13}}>Total P&L impact: <strong style={{color:forexReval.total_impact>=0?T.green:T.red}}>{fmt.kes(forexReval.total_impact)}</strong></div>
+          </Card>
+        </div>
+
+        <SectionHeader title="Creditors Due (FIN-010)" sub="Days payable outstanding · ⚠ due within 3 days"/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:18}}>
+          <DataTable headers={['Invoice','Supplier','Amount','Due Date','Days','Status']} empty="No open payables."
+            rows={creditors.map(c=>[<span style={{fontFamily:'monospace',fontSize:11}}>{c.invoice_no}</span>,c.supplier_name,fmt.kes(c.invoice_amount),fmt.date(c.due_date),
+              <span style={{fontWeight:700,color:c.due_soon?T.red:T.dgrey}}>{c.days_to_due}d</span>,
+              c.due_soon?<Badge variant="red">DUE ≤3d</Badge>:<Badge variant="green">on terms</Badge>])}/>
+        </Card>
+
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18,marginBottom:18}}>
+          <Card>
+            <SectionHeader title="Supplier Reconciliation (FIN-009)" sub={`Period ${remitPeriod}`}/>
+            <div style={{display:'flex',gap:8,alignItems:'flex-end',marginBottom:10}}>
+              <Select label="Supplier" value={reconForm.supplier_id} onChange={v=>setReconForm({...reconForm,supplier_id:v})} options={[{value:'',label:'Select…'},...suppliers.map(s=>({value:s.id,label:s.name}))]}/>
+              <Input label="Statement Bal." type="number" value={reconForm.statement_balance} onChange={v=>setReconForm({...reconForm,statement_balance:v})}/>
+              <Btn size="sm" onClick={reconcileSupplier}>Reconcile</Btn>
+            </div>
+            <DataTable headers={['Supplier','Period','Variance','Status']} empty="No reconciliations yet."
+              rows={supplierRecon.map(s=>[s.supplier_name,s.period,fmt.kes(s.variance),<Badge variant={s.status==='variance'?'red':'green'}>{s.status}</Badge>])}/>
+          </Card>
+          <Card>
+            <SectionHeader title="Statutory Remittance (FIN-025)"
+              action={<input type="month" value={remitPeriod} onChange={e=>loadRemit(e.target.value)} style={{padding:'5px 8px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>}/>
+            {remittance&&remittance.entries.length?(
+              <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:8}}>
+                {[['NSSF',remittance.totals.nssf],['SHA (NHIF)',remittance.totals.sha],['PAYE',remittance.totals.paye],['Housing Levy',remittance.totals.housing]].map(([l,v])=>(
+                  <div key={l} style={{padding:'8px 10px',background:T.offwt,borderRadius:6}}><div style={{fontSize:10,color:T.mgrey,textTransform:'uppercase'}}>{l}</div><div style={{fontSize:15,fontWeight:700,color:T.navy}}>{fmt.kes(v)}</div></div>
+                ))}
+                <div style={{gridColumn:'1/3',fontSize:11,color:T.mgrey}}>{remittance.entries.length} employees · NSSF due 15th · SHA due 9th</div>
+              </div>
+            ):<p style={{color:T.mgrey,fontSize:13,padding:10}}>No payroll run for {remitPeriod}.</p>}
+          </Card>
+        </div>
+
+        <SectionHeader title="P9 — Annual Tax Deduction Card (FIN-024)"
+          action={<Select value={p9Emp} onChange={loadP9} options={[{value:'',label:'Select employee…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>}/>
+        {p9?(
+          <Card style={{padding:0,overflow:'hidden'}}>
+            <div style={{padding:'10px 14px',background:T.offwt,fontSize:12}}><strong>{p9.employee?.name}</strong> · PIN {p9.employee?.kra_pin||'—'} · Year {p9.year}</div>
+            <DataTable headers={['Month','Gross','PAYE','NSSF','SHA','Housing']} empty="No payroll posted this year."
+              rows={[...p9.months.map(m=>[m.period,fmt.kes(m.gross_pay),fmt.kes(m.paye),fmt.kes(m.nssf),fmt.kes(m.nhif),fmt.kes(m.housing_levy)]),
+                ['TOTAL',fmt.kes(p9.totals.gross),fmt.kes(p9.totals.paye),fmt.kes(p9.totals.nssf),fmt.kes(p9.totals.nhif),fmt.kes(p9.totals.housing)].map((v,i)=>i===0?<strong>{v}</strong>:<strong style={{color:T.navy}}>{v}</strong>)]}/>
+          </Card>
+        ):<Card><p style={{color:T.mgrey,textAlign:'center',padding:20,fontSize:13}}>Select an employee to view their P9.</p></Card>}
       </>)}
 
       {!loading&&tab==='payauth'&&(

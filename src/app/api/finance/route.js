@@ -260,6 +260,90 @@ export async function GET(req) {
         return ok({ year, budgets, targets });
       }
 
+      // ── FIN-004: exchange rates (latest per currency) ────────────────────
+      case 'fx_rates': {
+        const rows = await query(
+          `SELECT er.* FROM exchange_rates er
+           WHERE er.rate_date = (SELECT MAX(rate_date) FROM exchange_rates WHERE currency=er.currency)
+           GROUP BY er.currency ORDER BY er.currency`
+        );
+        return ok(rows);
+      }
+
+      // ── FIN-004: month-end forex revaluation of open import LPOs ─────────
+      case 'forex_revaluation': {
+        const latest = await query(
+          `SELECT currency, rate_to_kes FROM exchange_rates er
+           WHERE rate_date=(SELECT MAX(rate_date) FROM exchange_rates WHERE currency=er.currency) GROUP BY currency`
+        );
+        const rateMap = Object.fromEntries(latest.map(r => [r.currency, r.rate_to_kes]));
+        const open = await query(
+          `SELECT id, lpo_no, currency, grand_total, fx_rate FROM lpos WHERE currency<>'KES' AND status<>'paid'`
+        );
+        const lines = open.map(l => {
+          const cur_rate = rateMap[l.currency] || l.fx_rate;
+          const original = Math.round(l.grand_total * l.fx_rate);
+          const revalued = Math.round(l.grand_total * cur_rate);
+          return { lpo_no: l.lpo_no, currency: l.currency, foreign_amount: l.grand_total, booked_rate: l.fx_rate, current_rate: cur_rate, original_kes: original, revalued_kes: revalued, fx_gain_loss: revalued - original };
+        });
+        const total_impact = lines.reduce((s, l) => s + l.fx_gain_loss, 0);
+        return ok({ lines, total_impact });
+      }
+
+      // ── FIN-009: supplier statement reconciliations ──────────────────────
+      case 'supplier_recon': {
+        const rows = await query(
+          `SELECT ss.*, s.name as supplier_name FROM supplier_statements ss
+           LEFT JOIN suppliers s ON ss.supplier_id=s.id ORDER BY ss.created_at DESC`
+        );
+        return ok(rows);
+      }
+
+      // ── FIN-010: creditors due — DPO per supplier + 3-day alert ──────────
+      case 'creditors_due': {
+        const rows = await query(
+          `SELECT si.id, si.invoice_no, si.invoice_amount, si.invoice_date, si.status,
+                  s.name as supplier_name, COALESCE(s.payment_terms,30) as payment_terms
+           FROM supplier_invoices si LEFT JOIN suppliers s ON si.supplier_id=s.id
+           WHERE si.status NOT IN ('paid') ORDER BY si.invoice_date`
+        );
+        const now = new Date();
+        const data = rows.map(r => {
+          const due = new Date(new Date(r.invoice_date).getTime() + (r.payment_terms||30)*86400000);
+          const days_to_due = Math.round((due - now) / 86400000);
+          return { ...r, due_date: due.toISOString().split('T')[0], days_to_due, due_soon: days_to_due <= 3 };
+        });
+        return ok(data);
+      }
+
+      // ── FIN-025: NSSF & SHA (NHIF) remittance schedule for a period ──────
+      case 'remittance': {
+        const p = period || new Date().toISOString().slice(0,7);
+        const run = await queryOne(`SELECT * FROM payroll_runs WHERE period=?`, [p]);
+        if (!run) return ok({ period: p, entries: [], totals: {} });
+        const entries = await query(
+          `SELECT pe.nssf, pe.nhif, pe.paye, pe.housing_levy, e.first_name||' '||e.last_name as name, e.emp_no
+           FROM payroll_entries pe JOIN employees e ON pe.employee_id=e.id WHERE pe.run_id=?`, [run.id]
+        );
+        const totals = entries.reduce((a,e)=>({ nssf:a.nssf+(e.nssf||0), sha:a.sha+(e.nhif||0), paye:a.paye+(e.paye||0), housing:a.housing+(e.housing_levy||0) }), {nssf:0,sha:0,paye:0,housing:0});
+        return ok({ period: p, entries, totals });
+      }
+
+      // ── FIN-024: P9 — annual tax deduction card per employee ─────────────
+      case 'p9': {
+        const employee_id = searchParams.get('employee_id');
+        const year = searchParams.get('year') || String(new Date().getFullYear());
+        if (!employee_id) return err('employee_id required', 400);
+        const emp = await queryOne(`SELECT emp_no, first_name||' '||last_name as name, kra_pin FROM employees WHERE id=?`, [employee_id]);
+        const months = await query(
+          `SELECT pr.period, pe.gross_pay, pe.paye, pe.nssf, pe.nhif, pe.housing_levy, pe.net_pay
+           FROM payroll_entries pe JOIN payroll_runs pr ON pe.run_id=pr.id
+           WHERE pe.employee_id=? AND pr.period LIKE ? ORDER BY pr.period`, [employee_id, `${year}%`]
+        );
+        const totals = months.reduce((a,m)=>({ gross:a.gross+(m.gross_pay||0), paye:a.paye+(m.paye||0), nssf:a.nssf+(m.nssf||0), nhif:a.nhif+(m.nhif||0), housing:a.housing+(m.housing_levy||0) }), {gross:0,paye:0,nssf:0,nhif:0,housing:0});
+        return ok({ employee: emp, year, months, totals });
+      }
+
       // ── The payment authority matrix (live from settings) — FIN-007 ──────
       case 'payment_authority': {
         const L = await paymentLimits();
@@ -685,6 +769,42 @@ export async function POST(req) {
           [id, fiscal_year, scope, annual_target, JSON.stringify(phase), auth.user.employee_id]);
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_REVENUE_TARGET', module: 'Finance', recordId: id, newValue: { scope, annual_target } });
         return ok({ id }, 201);
+      }
+
+      // ── FIN-004: set/update an exchange rate to KES ──────────────────────
+      case 'set_fx_rate': {
+        const { currency, rate_to_kes, rate_date } = body;
+        if (!currency || !rate_to_kes) return err('currency and rate_to_kes required', 400);
+        const d = rate_date || new Date().toISOString().split('T')[0];
+        const existing = await queryOne(`SELECT id FROM exchange_rates WHERE currency=? AND rate_date=?`, [currency.toUpperCase(), d]);
+        if (existing) await run(`UPDATE exchange_rates SET rate_to_kes=? WHERE id=?`, [rate_to_kes, existing.id]);
+        else await run(`INSERT INTO exchange_rates (id,currency,rate_to_kes,rate_date,created_by) VALUES (?,?,?,?,?)`,
+          [uuid(), currency.toUpperCase(), rate_to_kes, d, auth.user.employee_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'SET_FX_RATE', module: 'Finance', recordId: currency, newValue: { rate_to_kes, rate_date: d } });
+        return ok({ currency: currency.toUpperCase(), rate_to_kes, rate_date: d }, 201);
+      }
+
+      // ── FIN-009: reconcile a supplier statement; variance escalates to FM ─
+      case 'reconcile_supplier': {
+        const { supplier_id, period, statement_balance } = body;
+        if (!supplier_id || !period || statement_balance == null) return err('supplier_id, period and statement_balance required', 400);
+        // Ledger balance = unpaid supplier invoices for this supplier.
+        const [bal] = await query(`SELECT COALESCE(SUM(invoice_amount),0) as ledger FROM supplier_invoices WHERE supplier_id=? AND status NOT IN ('paid')`, [supplier_id]);
+        const ledger = bal.ledger || 0;
+        const variance = Math.round((statement_balance - ledger) * 100) / 100;
+        const status = Math.abs(variance) > 0.5 ? 'variance' : 'reconciled';
+        const existing = await queryOne(`SELECT id FROM supplier_statements WHERE supplier_id=? AND period=?`, [supplier_id, period]);
+        if (existing) await run(`UPDATE supplier_statements SET statement_balance=?, ledger_balance=?, variance=?, status=?, reconciled_by=? WHERE id=?`,
+          [statement_balance, ledger, variance, status, auth.user.employee_id, existing.id]);
+        else await run(`INSERT INTO supplier_statements (id,supplier_id,period,statement_balance,ledger_balance,variance,status,reconciled_by) VALUES (?,?,?,?,?,?,?,?)`,
+          [uuid(), supplier_id, period, statement_balance, ledger, variance, status, auth.user.employee_id]);
+        // FIN-009: escalate a variance to the Finance Manager via a task.
+        if (status === 'variance') {
+          const sup = await queryOne(`SELECT name FROM suppliers WHERE id=?`, [supplier_id]);
+          await run(`INSERT INTO tasks (id,title,due_date,priority,status,module,description) VALUES (?,?,date('now','+3 days'),'high','pending','Finance',?)`,
+            [uuid(), `Supplier reconciliation variance — ${sup?.name||supplier_id} (${period})`, `Statement ${statement_balance} vs ledger ${ledger}, variance ${variance}. Escalated to Finance Manager.`]);
+        }
+        return ok({ ledger_balance: ledger, variance, status });
       }
 
       // ── FIN-006: 3-way match a supplier invoice (LPO ↔ GRN ↔ invoice) ────

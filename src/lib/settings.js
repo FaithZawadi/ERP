@@ -36,6 +36,10 @@ const DEFAULTS = {
   'finance.pay_limit_dept_head':    '20000',
   'finance.pay_limit_finance_mgr':  '100000',
   'finance.pay_limit_cfo':          '500000',
+  // FX risk buffer on import LPOs (FIN-015)
+  'finance.fx_buffer':       '0.05',   // standard buffer on USD/CNY imports
+  'finance.fx_buffer_long':  '0.08',   // buffer when lead time exceeds the threshold
+  'finance.fx_buffer_lead_days': '60',
   // Minimum Selling Price margins by category (STK-010 / Part 4.3)
   'msp.margin_calibration':  '0.25',
   'msp.margin_construction': '0.15',

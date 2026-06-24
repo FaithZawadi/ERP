@@ -373,6 +373,32 @@ CREATE TABLE IF NOT EXISTS payment_batches (
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
+-- Exchange rates to KES (FIN-004). KES is base = 1; USD/CNY are revalued at
+-- month-end against the latest rate to report the forex P&L impact.
+CREATE TABLE IF NOT EXISTS exchange_rates (
+  id          TEXT PRIMARY KEY,
+  currency    TEXT NOT NULL,            -- USD | CNY | ...
+  rate_to_kes REAL NOT NULL,            -- 1 unit of currency = rate_to_kes KES
+  rate_date   TEXT NOT NULL,
+  created_by  TEXT REFERENCES employees(id),
+  created_at  TEXT DEFAULT (datetime('now'))
+);
+
+-- Monthly supplier statement reconciliation (FIN-009): statement balance vs
+-- ledger (open supplier invoices); a variance escalates to the Finance Manager.
+CREATE TABLE IF NOT EXISTS supplier_statements (
+  id                TEXT PRIMARY KEY,
+  supplier_id       TEXT REFERENCES suppliers(id),
+  period            TEXT NOT NULL,
+  statement_balance REAL NOT NULL,
+  ledger_balance    REAL DEFAULT 0,
+  variance          REAL DEFAULT 0,
+  status            TEXT DEFAULT 'reconciled',  -- reconciled | variance
+  reconciled_by     TEXT REFERENCES employees(id),
+  created_at        TEXT DEFAULT (datetime('now')),
+  UNIQUE(supplier_id, period)
+);
+
 -- Annual department/cost-centre budgets with monthly phasing (FIN-020).
 -- Actuals are derived from posted journal lines (category Expense) by dept;
 -- variance & 80%/100% alerts are computed against annual_amount (FIN-021).
@@ -555,6 +581,14 @@ CREATE TABLE IF NOT EXISTS lpos (
   md_sig          TEXT,
   delivery_terms  TEXT,
   notes           TEXT,
+  currency        TEXT DEFAULT 'KES',        -- FIN-015 import LPO currency
+  fx_rate         REAL DEFAULT 1,            -- rate to KES at order time
+  fx_buffer_pct   REAL DEFAULT 0,            -- 5% (8% if lead time > 60 days)
+  lead_time_days  INTEGER DEFAULT 0,
+  freight         REAL DEFAULT 0,
+  duty            REAL DEFAULT 0,
+  insurance       REAL DEFAULT 0,
+  landed_cost     REAL DEFAULT 0,            -- KES landed cost incl. buffer, duties, freight, insurance
   created_at      TEXT DEFAULT (datetime('now'))
 );
 

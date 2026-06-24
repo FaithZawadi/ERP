@@ -137,19 +137,38 @@ export async function POST(req) {
       }
 
       case 'create_lpo': {
-        const { pr_id, supplier_id, delivery_date, lines } = body;
+        const { pr_id, supplier_id, delivery_date, lines, currency, fx_rate, lead_time_days, freight, duty, insurance } = body;
         if (!supplier_id || !lines?.length) return err('supplier_id and lines required', 400);
 
+        const s = require('../../../lib/settings');
         const total      = lines.reduce((s, l) => s + l.total, 0);
-        const vat        = Math.round(total * 0.16);
+        const vatRate    = await s.getNum('finance.vat_rate', 0.16);
+        const vat        = Math.round(total * vatRate);
         const grand_total = total + vat;
         const lpo_no    = `LPO-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
         const lpoId     = uuid();
 
+        // FIN-015: FX risk buffer on import LPOs (USD/CNY) — 5% standard, 8%
+        // when lead time exceeds the threshold. Landed cost (KES) = value × rate
+        // + buffer + duties + freight + insurance.
+        const cur = (currency || 'KES').toUpperCase();
+        const rate = parseFloat(fx_rate) || 1;
+        const f = parseFloat(freight)||0, d = parseFloat(duty)||0, ins = parseFloat(insurance)||0;
+        let buffer_pct = 0, landed_cost;
+        if (cur !== 'KES') {
+          const lead = parseInt(lead_time_days||0, 10);
+          const leadThreshold = await s.getInt('finance.fx_buffer_lead_days', 60);
+          buffer_pct = lead > leadThreshold ? await s.getNum('finance.fx_buffer_long', 0.08) : await s.getNum('finance.fx_buffer', 0.05);
+          landed_cost = Math.round(grand_total * rate * (1 + buffer_pct) + f + d + ins);
+        } else {
+          landed_cost = grand_total + f + d + ins;
+        }
+
         await transaction(async ({ run: dbRun }) => {
           await dbRun(
-            `INSERT INTO lpos (id,lpo_no,pr_id,supplier_id,date,delivery_date,total,vat,grand_total) VALUES (?,?,?,?,date('now'),?,?,?,?)`,
-            [lpoId, lpo_no, pr_id, supplier_id, delivery_date, total, vat, grand_total]
+            `INSERT INTO lpos (id,lpo_no,pr_id,supplier_id,date,delivery_date,total,vat,grand_total,currency,fx_rate,fx_buffer_pct,lead_time_days,freight,duty,insurance,landed_cost)
+             VALUES (?,?,?,?,date('now'),?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [lpoId, lpo_no, pr_id, supplier_id, delivery_date, total, vat, grand_total, cur, rate, buffer_pct, parseInt(lead_time_days||0,10), f, d, ins, landed_cost]
           );
           for (const l of lines) {
             await dbRun(
@@ -160,7 +179,7 @@ export async function POST(req) {
           if (pr_id) await dbRun(`UPDATE purchase_requisitions SET lpo_id=?, status='lpo_issued' WHERE id=?`, [lpoId, pr_id]);
         });
 
-        return ok({ lpo_id: lpoId, lpo_no, total, vat, grand_total }, 201);
+        return ok({ lpo_id: lpoId, lpo_no, total, vat, grand_total, currency: cur, fx_buffer_pct: buffer_pct, landed_cost }, 201);
       }
 
       case 'create_grn': {

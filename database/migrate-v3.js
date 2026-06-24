@@ -583,6 +583,9 @@ async function migrate() {
     ['finance.pay_limit_dept_head', '20000', 'finance'],
     ['finance.pay_limit_finance_mgr', '100000', 'finance'],
     ['finance.pay_limit_cfo', '500000', 'finance'],
+    ['finance.fx_buffer', '0.05', 'finance'],
+    ['finance.fx_buffer_long', '0.08', 'finance'],
+    ['finance.fx_buffer_lead_days', '60', 'finance'],
     // MSP margins
     ['msp.margin_calibration', '0.25', 'msp'],
     ['msp.margin_construction', '0.15', 'msp'],
