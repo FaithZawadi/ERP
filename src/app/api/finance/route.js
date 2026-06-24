@@ -527,7 +527,10 @@ export async function POST(req) {
         for (const e of employees) {
           const ot = await query(`SELECT id, amount FROM overtime WHERE employee_id=? AND period=? AND status='approved'`, [e.id, period]);
           const overtime = ot.reduce((s, o) => s + (o.amount || 0), 0);
-          const ps = calculatePayslip({ basic_salary: e.basic_salary, allowances: 0, overtime, helb: e.helb_monthly || 0 });
+          // ATT-003: unpaid leave taken in the period is deducted at the daily rate (basic/26).
+          const [ul] = await query(`SELECT COALESCE(SUM(days),0) as days FROM leave_requests WHERE employee_id=? AND status='approved' AND lower(leave_type) LIKE '%unpaid%' AND start_date LIKE ?`, [e.id, `${period}%`]);
+          const unpaid_deduction = Math.round((ul?.days || 0) * (e.basic_salary || 0) / 26);
+          const ps = calculatePayslip({ basic_salary: e.basic_salary, allowances: 0, overtime, helb: e.helb_monthly || 0, other_deductions: unpaid_deduction });
           const advances = await query(
             `SELECT id, advance_balance FROM imprest WHERE employee_id=? AND status='CONVERTED' AND deducted_in_run IS NULL`, [e.id]
           );
@@ -556,9 +559,9 @@ export async function POST(req) {
           );
           for (const e of entries) {
             await dbRun(
-              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,helb,overtime,imprest_deduct,net_pay)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.helb||0, e.overtime||0, e.imprest_deduct||0, e.net_pay]
+              `INSERT INTO payroll_entries (id,run_id,employee_id,basic_salary,gross_pay,paye,nhif,nssf,housing_levy,helb,overtime,imprest_deduct,other_deductions,net_pay)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [e.id, runId, e.employee_id, e.basic_salary||0, e.gross_pay, e.paye, e.nhif, e.nssf, e.housing_levy, e.helb||0, e.overtime||0, e.imprest_deduct||0, e.other_deductions||0, e.net_pay]
             );
             for (const advId of e.advance_ids) {
               await dbRun(`UPDATE imprest SET status='deducted', deducted_in_run=?, deducted_at=datetime('now') WHERE id=?`, [runId, advId]);

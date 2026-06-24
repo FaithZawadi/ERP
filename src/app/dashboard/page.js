@@ -1633,6 +1633,11 @@ function HR({ api }) {
   const [incForm,setIncForm]=useState({employee_id:'',proposed_salary:'',effective_month:'2026-09',reason:''});
   const [discForm,setDiscForm]=useState({employee_id:'',incident_desc:''});
   const [advForm,setAdvForm]=useState({step:'',notes:''});
+  // Attendance hardening — ATT-003/004
+  const [attReport,setAttReport]=useState(null);
+  const [attPeriod,setAttPeriod]=useState('2026-06');
+  const [gpsTrail,setGpsTrail]=useState(null);
+  const [gpsEmp,setGpsEmp]=useState('');
 
   const load = async (t=tab) => {
     setLoading(true);
@@ -1672,6 +1677,8 @@ function HR({ api }) {
   const openDisc = async (id) => { const r=await api.get(`/api/hr?section=disciplinary_detail&id=${id}`); if(r?.success){setDiscDetail(r.data); const order=r.data.stage_order; const next=order[order.indexOf(r.data.case.stage)+1]||''; setAdvForm({step:next,notes:''});} };
   const advanceDisc = async () => { if(!advForm.step)return; const r=await api.post('/api/hr',{action:'advance_disciplinary',id:discDetail.case.id,step:advForm.step,notes:advForm.notes}); if(r?.success){setMsg({type:'success',text:`${advForm.step} recorded${r.data.closed?' — case closed':''}`});setDiscDetail(null);load('people');} else setMsg({type:'error',text:r?.error}); };
   const sendLdAlerts = async () => { const r=await api.post('/api/hr',{action:'send_ld_alerts'}); if(r?.success)setMsg({type:'success',text:`${r.data.alerts_raised} L&D alerts raised to HR`}); };
+  const loadAttReport = async (p) => { setAttPeriod(p); const r=await api.get(`/api/hr?section=attendance_report&period=${p}`); if(r?.success)setAttReport(r.data); };
+  const loadGps = async (emp) => { setGpsEmp(emp); if(!emp){setGpsTrail(null);return;} const r=await api.get(`/api/hr?section=gps_trail&employee_id=${emp}&days=60`); if(r?.success)setGpsTrail(r.data); };
 
   return (
     <div>
@@ -1774,6 +1781,28 @@ function HR({ api }) {
               />
             </Card>
           )}
+
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18,marginTop:18}}>
+            <Card>
+              <SectionHeader title="Monthly Attendance Report (ATT-003)" sub="Per-department absenteeism"
+                action={<input type="month" value={attPeriod} onChange={e=>loadAttReport(e.target.value)} style={{padding:'5px 8px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:12}}/>}/>
+              {attReport?(
+                <DataTable headers={['Dept','Head','Present','Absent','Absentee %']} empty="—"
+                  rows={attReport.departments.map(d=>[d.department,d.headcount,d.present_days,d.absent_days,
+                    <span style={{fontWeight:700,color:d.absenteeism_rate>20?T.red:d.absenteeism_rate>10?T.amber:T.green}}>{d.absenteeism_rate}%</span>])}/>
+              ):<p style={{color:T.mgrey,fontSize:13,padding:10}}>Pick a month to generate the report ({attReport?'':'—'}).</p>}
+            </Card>
+            <Card>
+              <SectionHeader title="Field GPS Trail (ATT-004)" sub="Last 60 days"
+                action={<Select value={gpsEmp} onChange={loadGps} options={[{value:'',label:'Select staff…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>}/>
+              {gpsTrail&&gpsTrail.length?(
+                <DataTable headers={['Date','In','Location','Late?']} empty="No trail."
+                  rows={gpsTrail.map(g=>[fmt.date(g.date),g.clock_in?new Date(g.clock_in).toLocaleTimeString():'—',
+                    g.location_name||(g.location_lat?`${g.location_lat},${g.location_lng}`:'—'),
+                    g.is_late?<Badge variant="red">late</Badge>:<Badge variant="green">ok</Badge>])}/>
+              ):<p style={{color:T.mgrey,fontSize:13,padding:10}}>Select a staff member to view their GPS clock-in trail.</p>}
+            </Card>
+          </div>
         </>
       )}
 

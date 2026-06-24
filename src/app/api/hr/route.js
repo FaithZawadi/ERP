@@ -119,6 +119,43 @@ export async function GET(req) {
         return ok({ case: c, steps, stage_order: DISC_STAGES });
       }
 
+      // ── ATT-003: monthly attendance report per department + absenteeism ──
+      case 'attendance_report': {
+        const p = searchParams.get('period') || new Date().toISOString().slice(0,7);
+        // Approx working days in the month (Mon–Fri).
+        const [yy, mm] = p.split('-').map(Number);
+        const daysInMonth = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+        let workingDays = 0;
+        for (let d = 1; d <= daysInMonth; d++) { const wd = new Date(Date.UTC(yy, mm-1, d)).getUTCDay(); if (wd !== 0 && wd !== 6) workingDays++; }
+        const rows = await query(
+          `SELECT e.department,
+                  COUNT(DISTINCT e.id) as headcount,
+                  (SELECT COUNT(*) FROM attendance a JOIN employees e2 ON a.employee_id=e2.id WHERE e2.department=e.department AND a.date LIKE ?) as present_days,
+                  (SELECT COUNT(*) FROM attendance a JOIN employees e2 ON a.employee_id=e2.id WHERE e2.department=e.department AND a.date LIKE ? AND a.is_late=1) as late_days
+           FROM employees e WHERE e.status='active' GROUP BY e.department`,
+          [`${p}%`, `${p}%`]
+        );
+        const data = rows.map(r => {
+          const expected = (r.headcount||0) * workingDays;
+          const absent = Math.max(0, expected - (r.present_days||0));
+          return { ...r, working_days: workingDays, expected_days: expected, absent_days: absent, absenteeism_rate: expected ? Math.round(absent/expected*1000)/10 : 0 };
+        });
+        return ok({ period: p, working_days: workingDays, departments: data });
+      }
+
+      // ── ATT-004: field staff GPS trail (for the Department Head) ─────────
+      case 'gps_trail': {
+        const empId = searchParams.get('employee_id');
+        if (!empId) return err('employee_id required', 400);
+        const days = parseInt(searchParams.get('days') || '30', 10);
+        const rows = await query(
+          `SELECT date, clock_in, clock_out, location_lat, location_lng, location_name, is_late
+           FROM attendance WHERE employee_id=? AND date >= date('now', ?) ORDER BY date DESC`,
+          [empId, `-${days} days`]
+        );
+        return ok(rows);
+      }
+
       // ── HR-025: L&D compliance vs the 40-hour target (Q3 alert) ──────────
       case 'ld_compliance': {
         const month = new Date().getMonth() + 1; // 1-12
@@ -182,18 +219,38 @@ export async function POST(req) {
         const exists = await queryOne(`SELECT id FROM attendance WHERE employee_id=? AND date=?`, [employee_id, today]);
         if (exists) return err('Already clocked in today', 409);
 
-        const now = new Date().toISOString();
-        const startHour = 8; // QSL start time 08:00
-        const clockHour = new Date().getHours();
-        const isLate    = clockHour >= startHour + 1; // 15min grace → 1hr for simplicity
+        const now = new Date();
+        // ATT-002: late if clock-in is more than the grace window after the
+        // scheduled start (both configurable in System Settings).
+        const s = require('../../../lib/settings');
+        const [wsH, wsM] = (await s.getSetting('hr.work_start', '08:00')).split(':').map(Number);
+        const grace = await s.getInt('hr.late_grace_minutes', 15);
+        const nowMin = now.getHours() * 60 + now.getMinutes();
+        const isLate = nowMin > (wsH * 60 + (wsM||0) + grace);
 
         await run(
           `INSERT INTO attendance (id,employee_id,date,clock_in,location_lat,location_lng,location_name,is_late)
            VALUES (?,?,?,?,?,?,?,?)`,
-          [uuid(), employee_id, today, now, location_lat, location_lng, location_name, isLate ? 1 : 0]
+          [uuid(), employee_id, today, now.toISOString(), location_lat, location_lng, location_name, isLate ? 1 : 0]
         );
 
-        return ok({ clocked_in: true, time: now, is_late: isLate });
+        let escalated = false;
+        if (isLate) {
+          const emp = await queryOne(`SELECT first_name||' '||last_name as name, department FROM employees WHERE id=?`, [employee_id]);
+          // Alert the Line Manager (HR task).
+          await run(`INSERT INTO tasks (id,title,due_date,priority,status,module,description) VALUES (?,?,date('now','+1 day'),'medium','pending','HR',?)`,
+            [uuid(), `Late arrival — ${emp?.name}`, `ATT-002: ${emp?.name} (${emp?.department}) clocked in late on ${today}. Line Manager to note.`]);
+          // 3 late instances in the month → escalate to HR.
+          const month = today.slice(0, 7);
+          const [c] = await query(`SELECT COUNT(*) as n FROM attendance WHERE employee_id=? AND is_late=1 AND date LIKE ?`, [employee_id, `${month}%`]);
+          if ((c?.n || 0) >= 3) {
+            escalated = true;
+            await run(`INSERT INTO tasks (id,title,due_date,priority,status,module,description) VALUES (?,?,date('now','+2 days'),'high','pending','HR',?)`,
+              [uuid(), `Lateness escalation — ${emp?.name}`, `ATT-002: ${emp?.name} has ${c.n} late arrivals in ${month} — escalated to HR.`]);
+          }
+        }
+
+        return ok({ clocked_in: true, time: now.toISOString(), is_late: isLate, escalated_to_hr: escalated });
       }
 
       case 'clock_out': {

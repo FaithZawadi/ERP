@@ -55,6 +55,9 @@ const DEFAULTS = {
     { from: 90,  to: 100, rate: 0.05 },
     { from: 100, to: 9999, rate: 0.07 },
   ]),
+  // Attendance (HR / ATT-002)
+  'hr.work_start': '08:00',
+  'hr.late_grace_minutes': '15',
   // Store & requisitions
   'store.low_stock_check_frequency': 'daily',
   'requisitions.approval_levels': JSON.stringify(['supervisor', 'store_manager']),
