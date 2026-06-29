@@ -49,6 +49,23 @@ export async function GET(req) {
            ORDER BY cj.scheduled_date`
         ));
 
+      // ── Service Request Forms (QSL/QP/013/SRF) ───────────────────────────
+      case 'service_requests': {
+        const rows = await query(
+          `SELECT sr.*, e.first_name||' '||e.last_name as reviewed_by_name
+           FROM service_requests sr LEFT JOIN employees e ON sr.reviewed_by=e.id
+           ORDER BY sr.created_at DESC`
+        );
+        return ok(rows);
+      }
+      case 'srf_detail': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const sr = await queryOne(`SELECT * FROM service_requests WHERE id=?`, [id]);
+        if (!sr) return err('Service request not found', 404);
+        return ok({ ...sr, equipment: JSON.parse(sr.equipment || '[]'), review: JSON.parse(sr.review || '{}') });
+      }
+
       case 'cert_detail': {
         const id = searchParams.get('id');
         if (!id) return err('id required', 400);
@@ -139,6 +156,44 @@ export async function POST(req) {
         await run(`INSERT INTO reference_standards (id,name,make,model,serial_no,traceable_to,last_cal_date,next_cal_date,uncertainty,status) VALUES (?,?,?,?,?,?,?,?,?,'current')`,
           [id, name, make, model, serial_no, traceable_to||'KEBS', last_cal_date, next_cal_date, uncertainty]);
         return ok({ id }, 201);
+      }
+
+      // ── Submit a Service Request Form ────────────────────────────────────
+      case 'create_srf': {
+        const { customer_name, contact_person, address, telephone, email, service_type, description, service_location, preferred_date, equipment, additional, applicant_name, applicant_designation, client_id } = body;
+        if (!customer_name || !service_type) return err('customer_name and service_type required', 400);
+        const id = uuid();
+        const srf_no = `SRF-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
+        await run(
+          `INSERT INTO service_requests (id,srf_no,customer_name,contact_person,address,telephone,email,request_date,service_type,description,service_location,preferred_date,equipment,additional,applicant_name,applicant_designation,client_id,status)
+           VALUES (?,?,?,?,?,?,?,date('now'),?,?,?,?,?,?,?,?,?,'submitted')`,
+          [id, srf_no, customer_name, contact_person, address, telephone, email, service_type, description, service_location||'lab', preferred_date, JSON.stringify(equipment||[]), additional, applicant_name, applicant_designation, client_id||null]
+        );
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'CREATE_SRF', module: 'Calibration', recordId: id, newValue: { srf_no, service_type } });
+        return ok({ id, srf_no }, 201);
+      }
+
+      // ── Technical review + accept/reject decision (Section 6/7 of the SRF) ─
+      case 'review_srf': {
+        const { id, decision, review, decision_reason, planned_date } = body;
+        if (!id || !decision) return err('id and decision required', 400);
+        const sr = await queryOne(`SELECT * FROM service_requests WHERE id=?`, [id]);
+        if (!sr) return err('Service request not found', 404);
+        const status = decision === 'accept' ? 'accepted' : 'rejected';
+        await run(
+          `UPDATE service_requests SET status=?, review=?, decision_reason=?, planned_date=?, reviewed_by=? WHERE id=?`,
+          [status, JSON.stringify(review||{}), decision_reason||null, planned_date||null, auth.user.employee_id, id]
+        );
+        // An accepted calibration/maintenance request seeds a calibration job.
+        let job_id = null;
+        if (status === 'accepted' && sr.client_id) {
+          job_id = uuid();
+          const job_no = `CAL-JOB-${Date.now().toString().slice(-5)}`;
+          await run(`INSERT INTO calibration_jobs (id,job_no,client_id,site,instruments,scheduled_date,status) VALUES (?,?,?,?,?,?,'scheduled')`,
+            [job_id, job_no, sr.client_id, sr.service_location, sr.description, planned_date||sr.preferred_date]);
+        }
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'REVIEW_SRF', module: 'Calibration', recordId: id, newValue: { decision: status } });
+        return ok({ status, job_created: !!job_id });
       }
 
       case 'schedule_job': {

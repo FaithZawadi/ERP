@@ -1121,9 +1121,40 @@ CREATE TABLE IF NOT EXISTS calibration_certs (
   humidity_pct    REAL,
   technician_id   TEXT REFERENCES employees(id),
   tech_sig        TEXT,
+  checked_by      TEXT REFERENCES employees(id),   -- "Checked By" second signatory (17025 template)
+  checked_sig     TEXT,
   cert_path       TEXT,
   etims_ref       TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Service Request Form (QSL/QP/013/SRF): customer intake for repair /
+-- maintenance / installation / calibration, with a technical review checklist
+-- and an accept/reject decision. An accepted SRF can spawn a calibration job.
+CREATE TABLE IF NOT EXISTS service_requests (
+  id               TEXT PRIMARY KEY,
+  srf_no           TEXT UNIQUE NOT NULL,
+  customer_name    TEXT NOT NULL,
+  contact_person   TEXT,
+  address          TEXT,
+  telephone        TEXT,
+  email            TEXT,
+  request_date     TEXT,
+  service_type     TEXT,                     -- repair | maintenance | installation | calibration | other
+  description      TEXT,
+  service_location TEXT,                      -- in_situ | lab
+  preferred_date   TEXT,
+  equipment        TEXT,                      -- JSON array of {name,model,serial,capacity,location,remarks}
+  additional       TEXT,
+  applicant_name   TEXT,
+  applicant_designation TEXT,
+  status           TEXT DEFAULT 'submitted',  -- submitted | accepted | rejected
+  review           TEXT,                       -- JSON checklist {within_scope,feasible,qualified,resources,impartiality,quotation}
+  decision_reason  TEXT,
+  planned_date     TEXT,
+  reviewed_by      TEXT REFERENCES employees(id),
+  client_id        TEXT REFERENCES clients(id),
+  created_at       TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS reference_standards (
