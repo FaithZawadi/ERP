@@ -3545,6 +3545,19 @@ function HSE({ api }) {
 }
 
 // ── CALIBRATION MODULE ────────────────────────────────────────────────────────
+// ISO/IEC 17025 calibration method procedures (EURAMET / OIML) plus the
+// certificate output template. Served as static documents from public/templates.
+const CAL_DOCUMENTS = [
+  {name:'Calibration Certificate',                       kind:'template',  ref:'Output document — ISO/IEC 17025 methodology', file:'QSL_CalibrationCertificate_Template.html'},
+  {name:'NAWI — Non-Automatic Weighing Instruments',     kind:'procedure', ref:'EURAMET cg-18 / OIML R76',                    file:'QSL_CalProc_01_NAWI.html'},
+  {name:'Standard Masses — Class M2',                     kind:'procedure', ref:'OIML R111-1 / EURAMET cg-18',                 file:'QSL_CalProc_02_StandardMasses_M2.html'},
+  {name:'Temperature Indicating & Sensing Devices',      kind:'procedure', ref:'EURAMET cg-13',                              file:'QSL_CalProc_03_Temperature.html'},
+  {name:'Volumetric Glassware & Instruments',            kind:'procedure', ref:'EURAMET cg-19',                              file:'QSL_CalProc_04_Volume.html'},
+  {name:'Pressure Gauges / Manometers',                  kind:'procedure', ref:'EURAMET cg-17',                              file:'QSL_CalProc_05_Pressure.html'},
+  {name:'Liquid Flow Meters — Gravimetric',              kind:'procedure', ref:'EURAMET cg-19 principles',                   file:'QSL_CalProc_06_Flow.html'},
+  {name:'Humidity Indicators & Climatic Enclosures',     kind:'procedure', ref:'EURAMET cg-20',                              file:'QSL_CalProc_07_Humidity.html'},
+];
+
 function CalibrationModule({ api }) {
   const [tab,setTab]=useState('certificates');
   const [certs,setCerts]=useState([]);
@@ -3569,7 +3582,7 @@ function CalibrationModule({ api }) {
   };
   return(<div>
     {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-    <Tabs tabs={[{id:'certificates',label:'Certificates'},{id:'standards',label:'Reference Standards'},{id:'uncertainty',label:'Uncertainty Budget'}]} active={tab} setActive={t=>setTab(t)}/>
+    <Tabs tabs={[{id:'certificates',label:'Certificates'},{id:'standards',label:'Reference Standards'},{id:'procedures',label:'Procedures & Templates'},{id:'uncertainty',label:'Uncertainty Budget'}]} active={tab} setActive={t=>setTab(t)}/>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
       <Stat label="Certs Issued" value={certs.length} icon="📜" variant="green"/>
       <Stat label="Passed" value={certs.filter(c=>c.result==='pass').length} icon="✅" variant="green"/>
@@ -3602,6 +3615,18 @@ function CalibrationModule({ api }) {
           <DataTable headers={['Standard','Traceability','Last Cal','Next Cal','Uncertainty','Status']}
             rows={standards.map(r=>[<div><strong style={{fontSize:12}}>{r.name}</strong><div style={{fontSize:10,color:T.mgrey}}>{r.make} {r.model}</div></div>,<div style={{fontSize:11}}><span style={{color:T.gold,fontWeight:700}}>QSL</span> → {r.traceable_to||'KEBS'} → BIPM</div>,fmt.date(r.last_cal_date),<span style={{color:r.status!=='current'?T.amber:T.green,fontWeight:600}}>{fmt.date(r.next_cal_date)}</span>,<span style={{fontFamily:'monospace',fontSize:11}}>{r.uncertainty||'—'}</span>,<Badge variant={r.status==='current'?'green':'amber'}>{r.status}</Badge>])}
           />
+        </Card>
+      </>):tab==='procedures'?(<>
+        <SectionHeader title="Calibration Procedures & Document Templates" sub="ISO/IEC 17025 methods (EURAMET / OIML) and the certificate output template"/>
+        <Alert type="info">Controlled documents — open to view or print. Procedures define the method, traceability and uncertainty model for each measurement discipline.</Alert>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Document','Type','Reference Method','']}
+            rows={CAL_DOCUMENTS.map(d=>[
+              <strong style={{fontSize:12,color:T.navy}}>{d.name}</strong>,
+              <Badge variant={d.kind==='template'?'navy':'blue'}>{d.kind}</Badge>,
+              <span style={{fontSize:11,color:T.mgrey}}>{d.ref}</span>,
+              <Btn size="sm" variant="ghost" onClick={()=>window.open(`/templates/calibration/${d.file}`,'_blank','noopener')}>View / Print</Btn>,
+            ])}/>
         </Card>
       </>):(
         <Card>
@@ -3826,7 +3851,7 @@ function InspectionModule({ api, user }) {
 
   return(<div>
     {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-    <Tabs tabs={[{id:'register',label:'Inspections'},{id:'inspectors',label:'Authorisation Register'},{id:'appeals',label:'Appeals'}]} active={tab} setActive={t=>setTab(t)}/>
+    <Tabs tabs={[{id:'register',label:'Inspections'},{id:'inspectors',label:'Authorisation Register'},{id:'appeals',label:'Appeals'},{id:'templates',label:'Report Templates'}]} active={tab} setActive={t=>setTab(t)}/>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
       <Stat label="Open Inspections" value={stats?.stats?.open||0} icon="🔍"/>
       <Stat label="Failed / Quarantined" value={stats?.stats?.quarantined||0} sub={`${stats?.open_ncrs||0} open NCRs`} icon="⛔" variant="red"/>
@@ -3861,11 +3886,21 @@ function InspectionModule({ api, user }) {
             ];
           })}/>
       </Card>
-    </>):(<>
+    </>):tab==='appeals'?(<>
       <SectionHeader title="Inspection Appeals" sub="INS-062 — reassigned to a different inspector; decided within 10 business days"/>
       <Card style={{padding:0,overflow:'hidden'}}>
         <DataTable headers={['Inspection','Grounds','Due Date','Status']}
           rows={appeals.map(r=>[<span style={{fontFamily:'monospace',fontSize:11}}>{r.ins_no}</span>,r.grounds||'—',fmt.date(r.due_date),<Badge variant={r.status==='open'?'amber':'green'}>{r.status}</Badge>])}/>
+      </Card>
+    </>):(<>
+      <SectionHeader title="Inspection Report Templates" sub="Controlled forms raised when equipment fails inspection (WE-04 NCR / quarantine)"/>
+      <Alert type="info">Open to view or print. A failed inspection (WE-01 FAIL) raises an NCR and quarantines the equipment — record it on the Failed Equipment Report.</Alert>
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Document','Type','Reference','']}
+          rows={[
+            ['Failed Equipment Report', <Badge variant="red">NCR / quarantine</Badge>, <span style={{fontSize:11,color:T.mgrey}}>ISO/IEC 17020 — WE-04</span>,
+              <Btn size="sm" variant="ghost" onClick={()=>window.open('/templates/inspection/QSL_FailedEquipmentReport_Template.html','_blank','noopener')}>View / Print</Btn>],
+          ]}/>
       </Card>
     </>)}
 
