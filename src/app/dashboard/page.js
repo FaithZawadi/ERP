@@ -468,6 +468,18 @@ function DashboardHome({ api, setActive }) {
 }
 
 // ── FINANCE MODULE ──────────────────────────────────────────────────────────
+// Finance document templates served as static HTML from public/templates/finance.
+const FIN_DOCUMENTS = [
+  {name:'Tax Invoice',         ref:'KRA eTIMS / VAT invoice',     file:'QSL_Invoice_Template.html'},
+  {name:'Quotation',           ref:'Sales quotation',            file:'QSL_Quote_Template.html'},
+  {name:'Credit Note',         ref:'Receivables adjustment',     file:'QSL_CreditNote_Template.html'},
+  {name:'Debit Note',          ref:'Receivables adjustment',     file:'QSL_DebitNote_Template.html'},
+  {name:'Customer Statement',  ref:'Account statement',          file:'QSL_Statement_Template.html'},
+  {name:'Imprest Form',        ref:'QSL-FIN-CHP-001 — 14-day rule', file:'QSL_ImprestForm_Template.html'},
+  {name:'Travel Claim',        ref:'Expense reimbursement',      file:'QSL_TravelClaim_Template.html'},
+  {name:'Payslip',             ref:'Payroll',                    file:'QSL_Payslip_Template.html'},
+];
+
 function Finance({ api }) {
   const [tab,setTab]=useState('imprest');
   const [imprest,setImprest]=useState([]);
@@ -633,7 +645,7 @@ function Finance({ api }) {
   const loadRemit = async (p) => { setRemitPeriod(p); const r=await api.get(`/api/finance?section=remittance&period=${p}`); if(r?.success)setRemittance(r.data); };
   const loadP9 = async (emp) => { setP9Emp(emp); if(!emp){setP9(null);return;} const r=await api.get(`/api/finance?section=p9&employee_id=${emp}&year=2026`); if(r?.success)setP9(r.data); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'}];
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'},{id:'templates',label:'Document Templates'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -641,6 +653,21 @@ function Finance({ api }) {
       {msg&&<Alert type={msg.type==='success'?'success':'error'}>{msg.text}</Alert>}
       <Tabs tabs={tabs} active={tab} setActive={t=>{setTab(t);load(t);}}/>
       {loading&&<Loading/>}
+
+      {!loading&&tab==='templates'&&(
+        <>
+          <SectionHeader title="Finance Document Templates" sub="Standard QSL documents — open to view or print"/>
+          <Alert type="info">These are the controlled output documents for finance and sales workflows (invoices, notes, statements, imprest, travel claims and payslips).</Alert>
+          <Card style={{padding:0,overflow:'hidden'}}>
+            <DataTable headers={['Document','Use','']}
+              rows={FIN_DOCUMENTS.map(d=>[
+                <strong style={{fontSize:12,color:T.navy}}>{d.name}</strong>,
+                <span style={{fontSize:11,color:T.mgrey}}>{d.ref}</span>,
+                <Btn size="sm" variant="ghost" onClick={()=>window.open(`/templates/finance/${d.file}`,'_blank','noopener')}>View / Print</Btn>,
+              ])}/>
+          </Card>
+        </>
+      )}
 
       {!loading&&tab==='imprest'&&(
         <>
