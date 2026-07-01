@@ -61,6 +61,38 @@ services:
       timeout: 10s
       retries: 3
 
+  # ── Scheduler (cron jobs: overdue imprest, compliance alerts, DB backup,
+  #    fleet alerts, debtor reminders, etc. — see src/lib/scheduler.js) ─────
+  # IMPORTANT: this is a separate long-running process from the `app`
+  # service above. Next.js's request/response model has no persistent
+  # background process of its own, so without this service none of the
+  # in-process cron.schedule() jobs registered in scheduler.js ever fire —
+  # they're effectively dead code unless something starts the scheduler.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qsl-erp-scheduler
+    restart: unless-stopped
+    command: ["npm", "run", "scheduler:start"]
+    environment:
+      NODE_ENV:           ${NODE_ENV:-development}
+      DATABASE_URL:       postgresql://qsl_user:${POSTGRES_PASSWORD:-qsl_pass_2026}@db:5432/qsl_erp
+      DB_FILE:            ./database/qsl_erp.db
+      SMTP_HOST:          ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:          ${SMTP_PORT:-587}
+      SMTP_USER:          ${SMTP_USER:-}
+      SMTP_PASS:          ${SMTP_PASS:-}
+      COMPANY_NAME:       "Qalibrated Systems Limited"
+    volumes:
+      - app_data:/app/database
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - qsl_net
+
   # ── PostgreSQL (Production database) ─────────────────────────────────────
   db:
     image: postgres:16-alpine

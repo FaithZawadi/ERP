@@ -29,6 +29,9 @@ const DEFAULTS = {
   'branding.accent_color':  '#C8960C',
   'branding.font_family':   'Inter',
   'branding.logo_url':      '/logo.svg',
+  // Public site URL — used to build certificate verify links and the
+  // sitemap/canonical URLs on the public website.
+  'branding.site_url':      'https://qalibrated.co.ke',
   // Finance
   'finance.vat_rate':            '0.16',
   'finance.imprest_retire_days': '14',
@@ -58,6 +61,9 @@ const DEFAULTS = {
   // Attendance (HR / ATT-002)
   'hr.work_start': '08:00',
   'hr.late_grace_minutes': '15',
+  'hr.appraisal_warning_score':      '50',   // manager/HR score below this triggers a warning
+  'hr.appraisal_final_warning_count': '2',    // consecutive low-score months -> final warning
+  'hr.appraisal_termination_count':   '3',    // consecutive low-score months -> termination review
   // Store & requisitions
   'store.low_stock_check_frequency': 'daily',
   'requisitions.approval_levels': JSON.stringify(['supervisor', 'store_manager']),
@@ -125,6 +131,7 @@ async function getCompany() {
     address:    all['company.address'],
     phone:      all['company.phone'],
     email:      all['company.email'],
+    site_url:   all['branding.site_url'],
   };
 }
 

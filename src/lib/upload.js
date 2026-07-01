@@ -14,7 +14,7 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads')
 const MAX_SIZE   = parseInt(process.env.MAX_FILE_SIZE || '10485760'); // 10MB
 
 // Ensure directories exist
-const DIRS = ['receipts', 'rams', 'policies', 'grn_photos', 'certificates', 'contracts', 'invoices', 'id_documents', 'branding'];
+const DIRS = ['receipts', 'rams', 'policies', 'grn_photos', 'certificates', 'contracts', 'invoices', 'id_documents', 'branding', 'sops'];
 DIRS.forEach(d => {
   const dir = path.join(UPLOAD_DIR, d);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

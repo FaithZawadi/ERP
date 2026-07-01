@@ -204,6 +204,47 @@ export async function GET(req) {
         return ok(cert);
       }
 
+      // CAL-PDF-001: the actual certificate PDF. issue_cert only persists the
+      // certificate *record*; the PDF itself is rendered here, on demand,
+      // from that record (and re-rendered fresh every time, so a later data
+      // correction or a template edit via Admin → Document Templates is
+      // always reflected — there's no stale cached file to go out of sync).
+      case 'cert_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const cert = await queryOne(
+          `SELECT cc.*, c.name as client_name, c.address as client_address,
+                  e.first_name as tech_first_name, e.last_name as tech_last_name,
+                  rs.name as std_name, rs.traceable_to,
+                  ck.first_name as checked_first_name, ck.last_name as checked_last_name
+           FROM calibration_certs cc
+           LEFT JOIN clients c ON cc.client_id=c.id
+           LEFT JOIN employees e ON cc.technician_id=e.id
+           LEFT JOIN employees ck ON cc.checked_by=ck.id
+           LEFT JOIN reference_standards rs ON cc.ref_standard_id=rs.id
+           WHERE cc.id=?`, [id]
+        );
+        if (!cert) return err('Certificate not found', 404);
+        if (cert.checked_first_name) cert.checked_by_name = `${cert.checked_first_name} ${cert.checked_last_name}`;
+        if (cert.instrument_type === 'nawi') {
+          const [test_points, repeatability, eccentricity] = await Promise.all([
+            query(`SELECT * FROM nawi_test_points WHERE cert_id=? ORDER BY sort_order`, [id]),
+            query(`SELECT * FROM nawi_repeatability_readings WHERE cert_id=? ORDER BY reading_no`, [id]),
+            query(`SELECT * FROM nawi_eccentricity_readings WHERE cert_id=? ORDER BY sort_order`, [id]),
+          ]);
+          cert.nawi = { test_points, repeatability, eccentricity };
+        }
+        const { generateCalibrationCert, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateCalibrationCert(
+          cert,
+          { name: cert.client_name, address: cert.client_address },
+          { first_name: cert.tech_first_name, last_name: cert.tech_last_name },
+          { name: cert.std_name, traceable_to: cert.traceable_to }
+        );
+        return ok(result);
+      }
+
       default:
         return err('Unknown section', 400);
     }
@@ -376,12 +417,12 @@ export async function POST(req) {
       }
 
       case 'schedule_job': {
-        const { client_id, site, instruments, scheduled_date, technician_id, project_id } = body;
+        const { client_id, site, instruments, scheduled_date, technician_id, project_id, quote_id } = body;
         if (!client_id || !scheduled_date) return err('client_id and scheduled_date required', 400);
         const id     = uuid();
         const job_no = `CAL-JOB-${Date.now().toString().slice(-5)}`;
-        await run(`INSERT INTO calibration_jobs (id,job_no,client_id,site,instruments,scheduled_date,technician_id,project_id,status) VALUES (?,?,?,?,?,?,?,?,'scheduled')`,
-          [id, job_no, client_id, site, instruments, scheduled_date, technician_id, project_id]);
+        await run(`INSERT INTO calibration_jobs (id,job_no,client_id,site,instruments,scheduled_date,technician_id,project_id,quote_id,status) VALUES (?,?,?,?,?,?,?,?,?,'scheduled')`,
+          [id, job_no, client_id, site, instruments, scheduled_date, technician_id, project_id, quote_id || null]);
         return ok({ id, job_no }, 201);
       }
 
@@ -438,6 +479,50 @@ export async function POST(req) {
         await run(`UPDATE calibration_jobs SET status='complete' WHERE id=?`, [job_id]);
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'JOB_COMPLETE', module: 'Calibration', recordId: job_id });
         return ok({ completed: true });
+      }
+
+      // BILL-001: turn a completed job into an invoice. If the job was
+      // scheduled against a quote (quote_id set), that quote's line items
+      // are the billable lines and the quote is marked invoiced in the
+      // same run. Ad-hoc jobs with no quote require the caller to supply
+      // lines directly, the same shape as a Tax invoice line. Either way
+      // this goes through the exact same src/lib/invoicing.js path as
+      // every other invoice — same MSP enforcement, VAT calc, eTIMS
+      // submission, and client email.
+      case 'generate_job_invoice': {
+        const { job_id, lines: suppliedLines, submit_to_etims } = body;
+        if (!job_id) return err('job_id required', 400);
+
+        const job = await queryOne(`SELECT * FROM calibration_jobs WHERE id=?`, [job_id]);
+        if (!job) return err('Job not found', 404);
+        if (job.status !== 'complete') return err('Job must be complete before it can be invoiced', 400);
+        if (job.billing_status === 'invoiced') return err('This job has already been invoiced', 400);
+
+        let lines = suppliedLines;
+        if (job.quote_id) {
+          const quoteLines = await query(`SELECT description, quantity, unit_price FROM quote_lines WHERE quote_id=?`, [job.quote_id]);
+          if (quoteLines.length) lines = quoteLines;
+        }
+        if (!lines?.length) {
+          return err(job.quote_id
+            ? 'The linked quote has no line items to bill'
+            : 'This job has no linked quote — supply line items to bill it directly', 400);
+        }
+
+        const { createInvoiceRecord } = require('../../../lib/invoicing');
+        const result = await createInvoiceRecord({
+          client_id: job.client_id,
+          date: new Date().toISOString().slice(0, 10),
+          due_date: null,
+          lines,
+          project_id: job.project_id,
+          submit_to_etims: !!submit_to_etims,
+          source_quote_id: job.quote_id || undefined,
+          source_job_id: job_id,
+          auth,
+        });
+        if (!result.ok) return err(result.error, result.status);
+        return ok(result.data, result.status);
       }
 
       // FLD-007: upload a job-site photo with GPS + timestamp evidence. The

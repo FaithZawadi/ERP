@@ -105,6 +105,139 @@ export async function GET(req) {
       }
 
       // RPT-001: MD Executive Dashboard
+      // RPT-NEW-6: Role-aware home dashboard — every role lands on a view
+      // built for their job, not a generic page. Reuses the same queries as
+      // the named reports below (md_dashboard, sales_performance, etc.) so
+      // figures always agree with the full reports.
+      case 'my_dashboard': {
+        const role = auth.user.role;
+        const empId = auth.user.employee_id;
+
+        // MD / Admin — full executive view (same as md_dashboard)
+        if (role === 'md' || role === 'admin') {
+          const [revenue]    = await query(`SELECT SUM(contract_value) as total, COUNT(*) as count FROM projects WHERE status='active'`);
+          const [collected]  = await query(`SELECT SUM(collected_total) as total FROM projects`);
+          const [expenses]   = await query(`SELECT SUM(expenses_total) as total FROM projects`);
+          const [invoiced]   = await query(`SELECT SUM(invoiced_total) as total FROM projects`);
+          const [overdueimp] = await query(`SELECT COUNT(*) as count, SUM(amount) as amount FROM imprest WHERE status IN ('OVERDUE','CONVERTED')`);
+          const [openBids]   = await query(`SELECT COUNT(*) as count, SUM(value) as pipeline FROM bids WHERE stopped=0`);
+          const [expDocs]    = await query(`SELECT COUNT(*) as count FROM compliance_docs WHERE expires_at < date('now','+60 days') AND status='current'`);
+          const [tasks]      = await query(`SELECT COUNT(*) as overdue FROM tasks WHERE status='pending' AND due_date < date('now')`);
+          const topDebts     = await query(`SELECT c.name, c.outstanding FROM clients c WHERE c.outstanding > 0 ORDER BY c.outstanding DESC LIMIT 10`);
+          return ok({
+            role_view: 'md',
+            revenue_active: revenue?.total || 0, active_projects: revenue?.count || 0,
+            total_collected: collected?.total || 0, total_expenses: expenses?.total || 0, total_invoiced: invoiced?.total || 0,
+            gross_profit: (revenue?.total || 0) - (expenses?.total || 0),
+            margin: revenue?.total ? ((revenue.total - expenses.total) / revenue.total) : 0,
+            overdue_imprest: overdueimp, open_bids: openBids, expiring_docs: expDocs?.count || 0, overdue_tasks: tasks?.overdue || 0,
+            top_debtors: topDebts,
+          });
+        }
+
+        // CFO — financial control view
+        if (role === 'cfo') {
+          const [collected]  = await query(`SELECT SUM(collected_total) as total FROM projects`);
+          const [expenses]   = await query(`SELECT SUM(expenses_total) as total FROM projects`);
+          const [invoiced]   = await query(`SELECT SUM(invoiced_total) as total FROM projects`);
+          const [overdueimp] = await query(`SELECT COUNT(*) as count, SUM(amount) as amount FROM imprest WHERE status IN ('OVERDUE','CONVERTED')`);
+          const [pendingImp] = await query(`SELECT COUNT(*) as count, SUM(amount) as amount FROM imprest WHERE status='requested'`);
+          const topDebts      = await query(`SELECT c.name, c.outstanding FROM clients c WHERE c.outstanding > 0 ORDER BY c.outstanding DESC LIMIT 10`);
+          const [agedTotal]   = await query(`SELECT SUM(outstanding) as total FROM clients WHERE outstanding > 0`);
+          const paymentsDue   = await query(
+            `SELECT s.name, l.grand_total, l.delivery_date FROM lpos l JOIN suppliers s ON l.supplier_id=s.id
+             WHERE l.status='delivered' AND l.delivery_date <= date('now','+7 days') ORDER BY l.grand_total DESC LIMIT 10`
+          );
+          const [pendingBatches] = await query(`SELECT COUNT(*) as count FROM payment_batches WHERE status NOT IN ('paid','rejected')`);
+          return ok({
+            role_view: 'cfo',
+            total_collected: collected?.total || 0, total_expenses: expenses?.total || 0, total_invoiced: invoiced?.total || 0,
+            total_outstanding: agedTotal?.total || 0,
+            overdue_imprest: overdueimp, pending_imprest: pendingImp,
+            top_debtors: topDebts, payments_due: paymentsDue, pending_payment_batches: pendingBatches?.count || 0,
+          });
+        }
+
+        // HR Manager — people view
+        if (role === 'hr_manager') {
+          const headcount     = await query(`SELECT department, COUNT(*) as count FROM employees WHERE status='active' GROUP BY department ORDER BY count DESC`);
+          const [pendingLeave] = await query(`SELECT COUNT(*) as count FROM leave_requests WHERE status='pending'`);
+          const [openDisc]     = await query(`SELECT COUNT(*) as count FROM disciplinary_cases WHERE status='open'`).catch(()=>[{count:0}]);
+          const expiringDocs  = await query(`SELECT e.first_name||' '||e.last_name as name, ed.doc_type, ed.expires_at FROM employee_documents ed JOIN employees e ON ed.employee_id=e.id WHERE ed.expires_at < date('now','+60 days') ORDER BY ed.expires_at LIMIT 10`).catch(()=>[]);
+          const recentLeave    = await query(`SELECT lr.*, e.first_name||' '||e.last_name as employee_name FROM leave_requests lr JOIN employees e ON lr.employee_id=e.id WHERE lr.status='pending' ORDER BY lr.created_at DESC LIMIT 10`);
+          const [totalActive]  = await query(`SELECT COUNT(*) as count FROM employees WHERE status='active'`);
+          return ok({
+            role_view: 'hr', total_active: totalActive?.count || 0, headcount_by_dept: headcount,
+            pending_leave: pendingLeave?.count || 0, open_disciplinary: openDisc?.count || 0,
+            expiring_documents: expiringDocs, recent_leave_requests: recentLeave,
+          });
+        }
+
+        // Commercial / Project Manager — pipeline + client view ("CM")
+        if (role === 'project_manager' || role === 'commercial_manager') {
+          const [pipeline]    = await query(`SELECT COUNT(*) as count, SUM(estimated_value) as value FROM leads WHERE won_lost IS NULL`);
+          const byStage        = await query(`SELECT stage, COUNT(*) as count, SUM(estimated_value) as value FROM leads WHERE won_lost IS NULL GROUP BY stage`);
+          const topClients     = await query(`SELECT name, outstanding FROM clients WHERE outstanding > 0 ORDER BY outstanding DESC LIMIT 10`);
+          const recentLeads    = await query(`SELECT l.*, e.first_name||' '||e.last_name as owner_name FROM leads l LEFT JOIN employees e ON l.owner=e.id WHERE l.won_lost IS NULL ORDER BY l.created_at DESC LIMIT 10`);
+          const teamPerf       = await query(
+            `SELECT e.first_name||' '||e.last_name as name, COUNT(l.id) as total_leads, SUM(l.estimated_value) as pipeline_value,
+                    COUNT(CASE WHEN l.won_lost='won' THEN 1 END) as wins
+             FROM employees e LEFT JOIN leads l ON l.owner=e.id
+             WHERE e.department='BD' OR e.role LIKE '%Sales%'
+             GROUP BY e.id ORDER BY pipeline_value DESC LIMIT 10`
+          );
+          return ok({ role_view: 'commercial', pipeline_count: pipeline?.count||0, pipeline_value: pipeline?.value||0, by_stage: byStage, top_clients: topClients, recent_leads: recentLeads, team_performance: teamPerf });
+        }
+
+        // Sales Representative — personal pipeline only
+        if (role === 'sales_rep' || (role === 'staff' && (auth.user.department === 'BD' || auth.user.department === 'Commercial'))) {
+          const myLeads        = await query(`SELECT * FROM leads WHERE owner=? AND won_lost IS NULL ORDER BY estimated_value DESC`, [empId]);
+          const [myPipeline]   = await query(`SELECT COUNT(*) as count, SUM(estimated_value) as value FROM leads WHERE owner=? AND won_lost IS NULL`, [empId]);
+          const [myWon]        = await query(`SELECT COUNT(*) as count, SUM(estimated_value) as value FROM leads WHERE owner=? AND won_lost='won'`, [empId]);
+          const recentVisits   = await query(`SELECT i.*, c.name as client_name FROM interactions i LEFT JOIN clients c ON i.client_id=c.id WHERE i.done_by=? ORDER BY i.date DESC LIMIT 10`, [empId]).catch(()=>[]);
+          return ok({ role_view: 'sales_rep', my_pipeline_count: myPipeline?.count||0, my_pipeline_value: myPipeline?.value||0, my_won_count: myWon?.count||0, my_won_value: myWon?.value||0, my_leads: myLeads, recent_visits: recentVisits });
+        }
+
+        // Technician / Quality Manager — calibration workload
+        if (role === 'technician' || role === 'qm') {
+          const myJobs          = await query(`SELECT * FROM calibration_jobs WHERE technician_id=? AND status!='complete' ORDER BY scheduled_date LIMIT 10`, [empId]).catch(()=>[]);
+          const [certsThisMon]  = await query(`SELECT COUNT(*) as count FROM calibration_certs WHERE technician_id=? AND calibrated_at >= date('now','start of month')`, [empId]).catch(()=>[{count:0}]);
+          const [pendingSrf]    = await query(`SELECT COUNT(*) as count FROM service_requests WHERE status='submitted'`).catch(()=>[{count:0}]);
+          const [openNcr]       = await query(`SELECT COUNT(*) as count FROM inspection_ncrs WHERE status='open'`).catch(()=>[{count:0}]);
+          return ok({ role_view: 'technical', my_open_jobs: myJobs, certs_this_month: certsThisMon?.count||0, pending_srf: pendingSrf?.count||0, open_ncr: openNcr?.count||0 });
+        }
+
+        // Store Manager / Clerk — inventory operations
+        if (role === 'store_manager' || role === 'store_clerk') {
+          const lowStock        = await query(`SELECT i.name, i.code, sb.quantity, i.reorder_level FROM items i JOIN stock_balances sb ON sb.item_id=i.id WHERE sb.quantity <= i.reorder_level AND i.is_active=1 ORDER BY sb.quantity LIMIT 10`).catch(()=>[]);
+          const [pendingTransfers] = await query(`SELECT COUNT(*) as count FROM stock_transfers WHERE status='pending'`).catch(()=>[{count:0}]);
+          const [pendingGrn]    = await query(`SELECT COUNT(*) as count FROM grns WHERE status!='complete'`).catch(()=>[{count:0}]);
+          const [totalValue]    = await query(`SELECT SUM(sb.quantity * i.unit_cost) as value FROM stock_balances sb JOIN items i ON sb.item_id=i.id`).catch(()=>[{value:0}]);
+          return ok({ role_view: 'stores', low_stock: lowStock, pending_transfers: pendingTransfers?.count||0, pending_grn: pendingGrn?.count||0, inventory_value: totalValue?.value||0 });
+        }
+
+        // Procurement Officer — purchasing pipeline
+        if (role === 'procurement_officer') {
+          const [pendingPr]     = await query(`SELECT COUNT(*) as count, SUM(amount) as amount FROM purchase_requisitions WHERE status LIKE 'pending%'`).catch(()=>[{count:0,amount:0}]);
+          const [openLpo]       = await query(`SELECT COUNT(*) as count, SUM(grand_total) as value FROM lpos WHERE status NOT IN ('delivered','cancelled')`).catch(()=>[{count:0,value:0}]);
+          const recentPr        = await query(`SELECT * FROM purchase_requisitions WHERE status LIKE 'pending%' ORDER BY created_at DESC LIMIT 10`).catch(()=>[]);
+          return ok({ role_view: 'procurement', pending_pr_count: pendingPr?.count||0, pending_pr_value: pendingPr?.amount||0, open_lpo_count: openLpo?.count||0, open_lpo_value: openLpo?.value||0, recent_prs: recentPr });
+        }
+
+        // Fleet Manager
+        if (role === 'fleet_manager') {
+          const vehicles        = await query(`SELECT COUNT(*) as count FROM vehicles WHERE status='active'`).catch(()=>[{count:0}]);
+          const [expiringIns]   = await query(`SELECT COUNT(*) as count FROM vehicles WHERE insurance_to < date('now','+30 days')`).catch(()=>[{count:0}]);
+          const [dueMaint]      = await query(`SELECT COUNT(*) as count FROM vehicle_maintenance WHERE next_due_date < date('now','+14 days')`).catch(()=>[{count:0}]);
+          return ok({ role_view: 'fleet', active_vehicles: vehicles[0]?.count||0, expiring_documents: expiringIns?.count||0, open_maintenance: dueMaint?.count||0 });
+        }
+
+        // Default / generic staff fallback
+        const [myTasks] = await query(`SELECT COUNT(*) as count FROM tasks WHERE assigned_to=? AND status='pending'`, [empId]).catch(()=>[{count:0}]);
+        return ok({ role_view: 'generic', my_pending_tasks: myTasks?.count || 0 });
+      }
+
+
       case 'md_dashboard': {
         const [revenue]    = await query(`SELECT SUM(contract_value) as total, COUNT(*) as count FROM projects WHERE status='active'`);
         const [collected]  = await query(`SELECT SUM(collected_total) as total FROM projects`);

@@ -2011,6 +2011,76 @@ CREATE TABLE IF NOT EXISTS job_work_inspections (
 );
 
 CREATE INDEX IF NOT EXISTS idx_job_inspections_job ON job_work_inspections(job_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- DOCUMENT TEMPLATES — editable overrides for the 19 auto-generated PDF
+-- document types (quotes, debit/credit notes, LPOs, etc). Lets an admin
+-- change the title, footer note, terms & conditions text, and signatory
+-- labels for any document type from inside the app, without touching
+-- code. generateBusinessDoc() in src/lib/pdf.js reads this table and
+-- overlays it on top of the built-in defaults (DOC_TYPES in pdf.js); a
+-- doc type with no row here just uses the defaults.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS document_templates (
+  doc_type        TEXT PRIMARY KEY,        -- matches DOC_TYPES key in pdf.js, e.g. 'quote'
+  title           TEXT,                     -- overrides the printed header title
+  footer_note     TEXT,                     -- short note printed in the document footer
+  terms_text      TEXT,                     -- terms & conditions / standard wording block
+  sign_labels     TEXT,                     -- JSON array overriding the signatory line labels
+  is_active       INTEGER DEFAULT 1,
+  updated_by      TEXT REFERENCES employees(id),
+  updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- MASS STANDARDS CALIBRATION — OIML R111:2004 results table (the official
+-- QSL_CERT-MASS certificate format: item no / nominal mass / conventional
+-- mass error / error limit / uncertainty, one row per mass standard,
+-- commonly 50 items per certificate). Parallel to nawi_test_points but for
+-- the mass-standards instrument class rather than weighing instruments.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS mass_test_items (
+  id                TEXT PRIMARY KEY,
+  cert_id           TEXT REFERENCES calibration_certs(id),
+  item_no           TEXT NOT NULL,
+  nominal_mass      TEXT,
+  error             TEXT,
+  error_limit       TEXT,
+  uncertainty       TEXT,
+  sort_order        INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mass_items_cert ON mass_test_items(cert_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- WEIGHBRIDGE PREVENTIVE MAINTENANCE & INSPECTION CHECKLIST — a standalone
+-- 24-item, 6-section (A-F) structured field form, distinct from the
+-- generic ISO 17020 pre/post-work checklist (job_work_inspections).
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS weighbridge_inspections (
+  id                  TEXT PRIMARY KEY,
+  ref_no              TEXT UNIQUE NOT NULL,
+  job_id              TEXT REFERENCES calibration_jobs(id),
+  client_id           TEXT REFERENCES clients(id),
+  site_location       TEXT,
+  equipment_model     TEXT,
+  serial_no           TEXT,
+  capacity            TEXT,
+  unit_no             TEXT,
+  inspection_date     TEXT NOT NULL,
+  next_inspection_due TEXT,
+  items               TEXT NOT NULL,
+  observations        TEXT,
+  corrective_actions  TEXT,
+  technician_id       TEXT REFERENCES employees(id),
+  technician_sig      TEXT,
+  tcml_rep_name       TEXT,
+  status              TEXT DEFAULT 'operational',
+  created_at          TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_weighbridge_client ON weighbridge_inspections(client_id);
 `;
 
 async function main() {

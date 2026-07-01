@@ -45,3 +45,28 @@ services:
     #   name: qsl-data
     #   mountPath: /var/data
     #   sizeGB: 1
+
+  # ── Scheduler (cron jobs) — NOT enabled by default ──────────────────────
+  # src/lib/scheduler.js registers daily/weekly cron jobs (overdue imprest,
+  # compliance alerts, DB backup, fleet alerts, debtor reminders, etc.) but
+  # they only run inside a long-lived `node src/lib/scheduler.js` process
+  # (`npm run scheduler:start`) — the `web` service above does NOT run them,
+  # since Next.js's request/response model has no background process of its
+  # own. Without this service (or an external cron hitting the individual
+  # `npm run jobs:*` scripts on a schedule), none of those jobs ever fire.
+  # Uncomment to run it as a Render Background Worker (paid plans only —
+  # background workers aren't available on the free tier):
+  # - type: worker
+  #   name: qsl-erp-scheduler
+  #   runtime: docker
+  #   plan: starter
+  #   dockerfilePath: ./Dockerfile
+  #   dockerContext: .
+  #   dockerCommand: npm run scheduler:start
+  #   envVars:
+  #     - key: NODE_ENV
+  #       value: production
+  #     - key: SQLITE_PATH
+  #       value: /var/data/qsl_erp.db   # must match the web service's path/disk
+  #     - key: UPLOAD_DIR
+  #       value: /var/data/uploads

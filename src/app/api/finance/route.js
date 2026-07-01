@@ -137,6 +137,23 @@ export async function GET(req) {
         return ok(runs);
       }
 
+      // FIN-PDF-001: download any individual employee's payslip — the
+      // Finance/HR/CFO-side equivalent of the self-service payslip_pdf on
+      // /api/me (that one only lets an employee download their own).
+      case 'payslip_pdf': {
+        const entry_id = searchParams.get('entry_id');
+        if (!entry_id) return err('entry_id required', 400);
+        const entry = await queryOne(
+          `SELECT pe.*, pr.period FROM payroll_entries pe JOIN payroll_runs pr ON pe.run_id=pr.id WHERE pe.id=?`, [entry_id]
+        );
+        if (!entry) return err('Payslip entry not found', 404);
+        const emp = await queryOne(`SELECT emp_no, first_name||' '||last_name as name, department, kra_pin FROM employees WHERE id=?`, [entry.employee_id]);
+        const { generatePayslip, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generatePayslip({ ...emp, ...entry }, entry, entry.period);
+        return ok(result);
+      }
+
       case 'gl': {
         const entries = await query(
           `SELECT je.*, e.first_name||' '||e.last_name as prepared_by_name
@@ -216,6 +233,54 @@ export async function GET(req) {
         let row = await queryOne(`SELECT * FROM month_end_close WHERE period=?`, [p]);
         if (!row) return ok({ period:p, status:'not_started', checklist: DEFAULT_CLOSE_CHECKLIST });
         return ok({ ...row, checklist: JSON.parse(row.checklist || '[]') });
+      }
+
+      // FIN-PDF-002: the full branded Profit & Loss Statement PDF —
+      // generateProfitAndLoss() in pdf.js was fully built (and, until a
+      // companion fix this round, would crash on any period with no GL
+      // postings due to a typo'd colour constant) but never actually wired
+      // to a route — the Month-End & P&L screen had no way to produce one.
+      // Groups posted journal lines by account `type` (cogs_*, opex_*,
+      // depreciation, finance_cost, revenue, other-income types) into the
+      // exact section shape the PDF generator expects.
+      case 'pl_statement_pdf': {
+        const p = period || new Date().toISOString().slice(0, 7);
+        const rows = await query(
+          `SELECT coa.name, coa.type, SUM(jl.credit - jl.debit) as net_credit, SUM(jl.debit - jl.credit) as net_debit
+           FROM journal_lines jl
+           JOIN journal_entries je ON jl.entry_id=je.id AND je.status='posted'
+           JOIN chart_of_accounts coa ON jl.account_id=coa.id
+           WHERE je.date LIKE ? AND coa.type NOT IN ('header')
+           GROUP BY coa.id, coa.name, coa.type
+           HAVING net_credit != 0 OR net_debit != 0
+           ORDER BY coa.name`,
+          [`${p}%`]
+        );
+        const has_gl_data = rows.length > 0;
+        const pick = (pred, useCreditSide) => rows.filter(r => pred(r.type)).map(r => ({ name: r.name, amount: useCreditSide ? (r.net_credit || 0) : (r.net_debit || 0) }));
+        const sum = (arr) => arr.reduce((s, r) => s + r.amount, 0);
+
+        const revenue   = pick(t => t === 'revenue', true);
+        const cogs      = pick(t => t.startsWith('cogs_'), false);
+        const opex      = pick(t => t.startsWith('opex_'), false);
+        const depreciation = pick(t => t === 'depreciation', false);
+        const otherIncome  = pick(t => ['forex', 'ic_income', 'interest', 'other_income'].includes(t), true);
+        const financeCosts = pick(t => t === 'finance_cost', false);
+
+        const totalRevenue = sum(revenue), totalCOGS = sum(cogs), grossProfit = totalRevenue - totalCOGS;
+        const totalOpex = sum(opex), totalDepreciation = sum(depreciation);
+        const operatingProfit = grossProfit - totalOpex - totalDepreciation;
+        const totalOtherIncome = sum(otherIncome), totalFinanceCosts = sum(financeCosts);
+        const netProfit = operatingProfit + totalOtherIncome - totalFinanceCosts;
+
+        const { generateProfitAndLoss, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateProfitAndLoss(
+          { revenue, totalRevenue, cogs, totalCOGS, grossProfit, opex, totalOpex, depreciation, totalDepreciation,
+            operatingProfit, otherIncome, totalOtherIncome, financeCosts, totalFinanceCosts, netProfit, has_gl_data },
+          p, auth.user.name
+        );
+        return ok(result);
       }
 
       // ── P&L by department from POSTED journals (FIN-001) ─────────────────
@@ -415,10 +480,19 @@ export async function GET(req) {
         );
         return ok(rows);
       }
+      case 'quote_detail': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const q = await queryOne(`SELECT q.*, c.name as client_name FROM quotes q LEFT JOIN clients c ON q.client_id=c.id WHERE q.id=?`, [id]);
+        if (!q) return err('Not found', 404);
+        const lines = await query(`SELECT * FROM quote_lines WHERE quote_id=?`, [id]);
+        return ok({ ...q, lines });
+      }
       case 'quote_pdf': {
         const id = searchParams.get('id');
         if (!id) return err('id required', 400);
-        const q = await queryOne(`SELECT q.*, c.name as client_name, c.address as client_address, c.kra_pin as client_pin
+        const q = await queryOne(`SELECT q.*, c.name as client_name, c.address as client_address, c.kra_pin as client_pin,
+                                          c.contact_person, c.phone as client_phone, c.email as client_email
                                    FROM quotes q LEFT JOIN clients c ON q.client_id=c.id WHERE q.id=?`, [id]);
         if (!q) return err('Not found', 404);
         const lines = await query(`SELECT * FROM quote_lines WHERE quote_id=?`, [id]);
@@ -426,22 +500,28 @@ export async function GET(req) {
         await loadCompany();
         const result = await generateBusinessDoc('quote', {
           docNo: q.quote_no,
+          headerDate: q.date ? `Friday, ${new Date(q.date).toLocaleDateString('en-KE', { day: 'numeric', month: 'long', year: 'numeric' })}` : undefined,
+          headerBadge: q.valid_until ? `Valid until ${new Date(q.valid_until).toLocaleDateString('en-KE', { day: 'numeric', month: 'long', year: 'numeric' })}` : undefined,
           blocks: {
-            Client:   { Name: q.client_name, PIN: q.client_pin, Address: q.client_address },
-            Validity: { Date: q.date, 'Valid Until': q.valid_until, Status: q.status },
+            'Bill To':   { 'Client Name': q.client_name, Address: q.client_address || '—', 'KRA PIN': q.client_pin || '—', 'Contact Phone': q.client_phone || '—', 'Contact Email': q.client_email || '—' },
           },
           columns: [
             { label: 'Description', key: 'description', weight: 3 },
             { label: 'Qty', key: 'quantity', weight: 1, align: 'right' },
-            { label: 'Unit Price', key: 'unit_price', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
-            { label: 'Total', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+            { label: 'Rate (KES)', key: 'unit_price', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE', { minimumFractionDigits: 2 }) },
+            { label: 'Amount (KES)', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE', { minimumFractionDigits: 2 }) },
           ],
           rows: lines,
           totals: [
-            { label: 'Subtotal', value: Number(q.subtotal||0).toLocaleString('en-KE') },
-            { label: 'VAT', value: Number(q.vat_amount||0).toLocaleString('en-KE') },
-            { label: 'GRAND TOTAL', value: `Kshs ${Number(q.total||0).toLocaleString('en-KE')}` },
+            { label: 'Sub Total', value: `KES ${Number(q.subtotal||0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}` },
+            { label: 'VAT @ 16%', value: `KES ${Number(q.vat_amount||0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}` },
+            { label: 'TOTAL DUE', value: `KES ${Number(q.total||0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}` },
           ],
+          paymentDetails: {
+            'Bank Name': 'Kenya Commercial Bank (KCB)', 'Branch': 'Industrial Area',
+            'Account Name': 'Qalibrated Systems Limited', 'Account No.': '1319820654', 'Currency': 'KES',
+            'M-PESA Paybill': '522533', 'Account No': '8877900',
+          },
         });
         return ok(result);
       }
@@ -1166,6 +1246,52 @@ export async function POST(req) {
         return ok({ id, quote_no, subtotal, vat_amount, total }, 201);
       }
 
+      // COM-QUOTE-001: any authenticated user who can see a quote (sales
+      // reps and technicians included — quote creation lives in Commercial
+      // for them, not Finance) can email it straight to the client with the
+      // real PDF attached, generated fresh at send time.
+      case 'send_quote': {
+        const { quote_id } = body;
+        if (!quote_id) return err('quote_id required', 400);
+        const q = await queryOne(
+          `SELECT q.*, c.name as client_name, c.address as client_address, c.kra_pin as client_pin, c.email as client_email, c.contact_person
+           FROM quotes q LEFT JOIN clients c ON q.client_id=c.id WHERE q.id=?`, [quote_id]
+        );
+        if (!q) return err('Quote not found', 404);
+        if (!q.client_email) return err('This client has no email address on file — add one in Commercial before sending', 400);
+        const lines = await query(`SELECT * FROM quote_lines WHERE quote_id=?`, [quote_id]);
+
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const pdfResult = await generateBusinessDoc('quote', {
+          docNo: q.quote_no,
+          blocks: {
+            Client:   { Name: q.client_name, PIN: q.client_pin, Address: q.client_address },
+            Validity: { Date: q.date, 'Valid Until': q.valid_until, Status: q.status },
+          },
+          columns: [
+            { label: 'Description', key: 'description', weight: 3 },
+            { label: 'Qty', key: 'quantity', weight: 1, align: 'right' },
+            { label: 'Unit Price', key: 'unit_price', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+            { label: 'Total', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+          ],
+          rows: lines,
+          totals: [
+            { label: 'Subtotal', value: Number(q.subtotal||0).toLocaleString('en-KE') },
+            { label: 'VAT', value: Number(q.vat_amount||0).toLocaleString('en-KE') },
+            { label: 'GRAND TOTAL', value: `Kshs ${Number(q.total||0).toLocaleString('en-KE')}` },
+          ],
+        });
+
+        const { sendQuotePdf } = require('../../../lib/email');
+        const emailResult = await sendQuotePdf(q, { name: q.client_name, email: q.client_email, contact_person: q.contact_person }, lines, pdfResult.path, auth.user.name);
+
+        if (q.status === 'draft') await run(`UPDATE quotes SET status='sent' WHERE id=?`, [quote_id]);
+        await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'SEND_QUOTE', module: 'Commercial', recordId: quote_id, newValue: { sent_to: q.client_email, mock: !!emailResult.mock } });
+
+        return ok({ sent: emailResult.success, mock: !!emailResult.mock, to: q.client_email, pdf_url: pdfResult.url });
+      }
+
       // QSL_DebitNote_Template / QSL_CreditNote_Template
       case 'create_debit_note':
       case 'create_credit_note': {
@@ -1242,10 +1368,32 @@ export async function PUT(req) {
       // ── FIN-012A: retire imprest — a receipt is mandatory before claiming;
       //    ~20% are auto-flagged for Finance Manager spot-check ──────────────
       case 'account_imprest': {
-        const { amount_accounted, receipt_path } = body;
+        const { amount_accounted, receipt_path, file_name, file_data } = body;
         const imp = await queryOne(`SELECT * FROM imprest WHERE id=?`, [id]);
         if (!imp) return err('Imprest not found', 404);
-        const receipt = receipt_path || imp.receipt_path;
+
+        // FIN-012A: accept the receipt as a real camera/gallery photo (or a
+        // scanned PDF) sent as a base64 data URL — same convention as SOPs
+        // and GRN photos elsewhere — rather than asking a non-technical
+        // user to type/paste a file path or URL by hand. receipt_path is
+        // still accepted as a plain string for backward compatibility, but
+        // the upload path takes priority when a new file is provided.
+        let receipt = receipt_path || imp.receipt_path;
+        if (file_data) {
+          const match = /^data:([^;]+);base64,(.+)$/.exec(file_data);
+          if (!match) return err('file_data must be a base64 data URL', 400);
+          const path = require('path');
+          const fs = require('fs');
+          const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
+          const dir = path.join(UPLOAD_DIR, 'receipts');
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          const buffer = Buffer.from(match[2], 'base64');
+          const ext = path.extname(file_name || '') || '.jpg';
+          const stored = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+          fs.writeFileSync(path.join(dir, stored), buffer);
+          receipt = `/uploads/receipts/${stored}`;
+        }
+
         if (!receipt) return err('FIN-012A: a receipt photo/PDF is mandatory before an imprest can be claimed/retired. Upload the receipt first.', 400);
         const spot = Math.random() < 0.2 ? 1 : 0; // 20% spot-check
         await run(
@@ -1253,7 +1401,7 @@ export async function PUT(req) {
           [amount_accounted, receipt, spot, spot ? 0 : 1, id]
         );
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'RETIRE_IMPREST', module: 'Finance', recordId: id, newValue: { amount_accounted, spot_check: spot } });
-        return ok({ updated: true, spot_check: !!spot });
+        return ok({ updated: true, spot_check: !!spot, receipt_url: receipt });
       }
 
       case 'upload_receipt': {

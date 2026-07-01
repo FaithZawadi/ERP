@@ -435,7 +435,10 @@ async function migrate() {
     ['fleet_manager',   'Fleet Manager',       0],
     ['hr_manager',      'HR Manager',          0],
     ['project_manager', 'Project Manager',     0],
+    ['commercial_manager', 'Commercial Manager', 0],
+    ['sales_rep',       'Sales Representative', 0],
     ['technician',      'Calibration Technician', 0],
+    ['qm',              'Quality Manager',     0],
     ['staff',           'General Staff',       0],
   ];
   console.log('Seeding roles...');

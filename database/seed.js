@@ -44,7 +44,16 @@ async function main() {
   }
 
   // ── USERS + DIGITAL SIGNATURES ────────────────────────────────────────────────
-  const roleMap = { 'Managing Director': 'md', 'Finance Manager': 'cfo', 'HR Manager': 'hr_manager', 'ICT Head': 'admin' };
+  const roleMap = {
+    'Managing Director': 'md',
+    'Finance Manager':   'cfo',
+    'HR Manager':        'hr_manager',
+    'ICT Head':          'it_admin',
+    'Project Manager':   'project_manager',
+    'Senior Engineer':   'technician',
+    'Sales Engineer':    'sales_rep',
+    'Accountant':        'accountant',
+  };
   const defaultRole = (role) => roleMap[role] || 'staff';
   const hashed = bcrypt.hashSync('QSL@2026!', 12);
 
