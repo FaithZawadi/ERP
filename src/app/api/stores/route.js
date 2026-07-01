@@ -199,6 +199,104 @@ export async function GET(req) {
       return ok(rows);
     }
 
+    // QSL_StockTransferNote_Template — branded Stock Transfer Note PDF
+    if (section === 'transfer_pdf') {
+      const id = searchParams.get('id');
+      if (!id) return err('id required', 400);
+      const st = await queryOne(
+        `SELECT st.*, i.name as item_name, i.code as item_code, i.unit,
+                fl.name as from_location_name, tl.name as to_location_name,
+                e1.first_name||' '||e1.last_name as requested_by_name,
+                e2.first_name||' '||e2.last_name as approved_by_name
+         FROM stock_transfers st
+         JOIN items i ON st.item_id=i.id
+         JOIN store_locations fl ON st.from_location_id=fl.id
+         JOIN store_locations tl ON st.to_location_id=tl.id
+         LEFT JOIN employees e1 ON st.requested_by=e1.id
+         LEFT JOIN employees e2 ON st.approved_by=e2.id WHERE st.id=?`, [id]);
+      if (!st) return err('Not found', 404);
+      const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+      await loadCompany();
+      const result = await generateBusinessDoc('stock_transfer', {
+        docNo: `STN-${st.id.slice(0, 8).toUpperCase()}`,
+        blocks: {
+          From: { Location: st.from_location_name, 'Requested by': st.requested_by_name },
+          To:   { Location: st.to_location_name, 'Approved by': st.approved_by_name || 'Pending' },
+        },
+        columns: [
+          { label: 'Item Code', key: 'item_code', weight: 1 },
+          { label: 'Description', key: 'item_name', weight: 2 },
+          { label: 'Quantity', key: 'quantity', weight: 1, align: 'right' },
+          { label: 'Unit', key: 'unit', weight: 1 },
+        ],
+        rows: [st],
+        notes: st.reason || '',
+      });
+      return ok(result);
+    }
+
+    // QSL_GoodsIssueNote_Template — branded Goods Issue Note PDF for an issue movement
+    if (section === 'gin_pdf') {
+      const id = searchParams.get('id');
+      if (!id) return err('id required', 400);
+      const m = await queryOne(
+        `SELECT sm.*, i.code as item_code, i.name as item_name, i.unit,
+                e.first_name||' '||e.last_name as issued_by_name, p.name as project_name
+         FROM stock_movements sm
+         JOIN items i ON sm.item_id=i.id
+         LEFT JOIN employees e ON sm.done_by=e.id
+         LEFT JOIN projects p ON sm.project_id=p.id
+         WHERE sm.id=? AND sm.type='issue'`, [id]);
+      if (!m) return err('Not found', 404);
+      const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+      await loadCompany();
+      const result = await generateBusinessDoc('goods_issue', {
+        docNo: `GIN-${m.id.slice(0, 8).toUpperCase()}`,
+        blocks: {
+          'Issued To': { Reference: m.reference || '—', 'Issued by': m.issued_by_name },
+          Project:     { Project: m.project_name || 'N/A', Date: m.date },
+        },
+        columns: [
+          { label: 'Item Code', key: 'item_code', weight: 1 },
+          { label: 'Description', key: 'item_name', weight: 2 },
+          { label: 'Qty Issued', key: 'quantity', weight: 1, align: 'right', format: v => Math.abs(Number(v||0)) },
+          { label: 'Unit', key: 'unit', weight: 1 },
+        ],
+        rows: [m],
+        notes: m.notes || '',
+      });
+      return ok(result);
+    }
+
+    // QSL_StockTakeSheet_Template — branded count sheet for a location (system
+    // quantities pre-filled, blank column left for the physical count)
+    if (section === 'stock_take_pdf') {
+      const location_id = searchParams.get('location_id');
+      if (!location_id) return err('location_id required', 400);
+      const loc = await queryOne(`SELECT * FROM store_locations WHERE id=?`, [location_id]);
+      if (!loc) return err('Location not found', 404);
+      const balances = await query(
+        `SELECT sb.*, i.code as item_code, i.name as item_name, i.unit
+         FROM stock_balances sb JOIN items i ON sb.item_id=i.id
+         WHERE sb.location_id=? AND sb.quantity != 0 ORDER BY i.name`, [location_id]);
+      const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+      await loadCompany();
+      const result = await generateBusinessDoc('stock_take', {
+        docNo: `ST-${loc.code}-${new Date().toISOString().slice(0, 10)}`,
+        blocks: { Location: { Name: loc.name, Code: loc.code }, Date: { Date: new Date().toLocaleDateString('en-KE'), 'Items Listed': balances.length } },
+        columns: [
+          { label: 'Item Code', key: 'item_code', weight: 1 },
+          { label: 'Description', key: 'item_name', weight: 2 },
+          { label: 'System Qty', key: 'quantity', weight: 1, align: 'right' },
+          { label: 'Unit', key: 'unit', weight: 0.8 },
+          { label: 'Counted Qty', key: '_blank', weight: 1, align: 'right', format: () => '________' },
+        ],
+        rows: balances,
+        notes: 'Counted quantity column to be completed manually during physical stock take.',
+      });
+      return ok(result);
+    }
+
     return err('Unknown section', 400);
   } catch (e) {
     console.error('[Stores GET]', e);

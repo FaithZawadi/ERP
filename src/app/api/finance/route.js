@@ -99,6 +99,29 @@ export async function GET(req) {
         return ok(rows);
       }
 
+      // QSL_ImprestForm_Template — branded Imprest Request PDF
+      case 'imprest_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const im = await queryOne(
+          `SELECT i.*, e.first_name||' '||e.last_name as employee_name, e.department
+           FROM imprest i JOIN employees e ON i.employee_id=e.id WHERE i.id=?`, [id]);
+        if (!im) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('imprest_form', {
+          docNo: `IMP-${im.id.slice(0, 8).toUpperCase()}`,
+          blocks: {
+            Requester: { Name: im.employee_name, Department: im.department, Date: new Date(im.created_at).toLocaleDateString('en-KE') },
+            Purpose:   { Purpose: im.purpose, Status: im.status },
+          },
+          columns: [{ label: 'Description', key: 'purpose', weight: 3 }, { label: 'Amount (Kshs)', key: 'amount', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') }],
+          rows: [im],
+          totals: [{ label: 'TOTAL REQUESTED', value: `Kshs ${Number(im.amount||0).toLocaleString('en-KE')}` }],
+        });
+        return ok(result);
+      }
+
       case 'payroll': {
         if (period) {
           const run     = await queryOne(`SELECT * FROM payroll_runs WHERE period=?`, [period]);
@@ -383,6 +406,142 @@ export async function GET(req) {
           { level:'CFO',              limit:L.cfo,       role:'cfo' },
           { level:'Managing Director',limit:null,        role:'md' },
         ]);
+      }
+
+      // QSL_Quote_Template — list + PDF
+      case 'quotes': {
+        const rows = await query(
+          `SELECT q.*, c.name as client_name FROM quotes q LEFT JOIN clients c ON q.client_id=c.id ORDER BY q.created_at DESC LIMIT 100`
+        );
+        return ok(rows);
+      }
+      case 'quote_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const q = await queryOne(`SELECT q.*, c.name as client_name, c.address as client_address, c.kra_pin as client_pin
+                                   FROM quotes q LEFT JOIN clients c ON q.client_id=c.id WHERE q.id=?`, [id]);
+        if (!q) return err('Not found', 404);
+        const lines = await query(`SELECT * FROM quote_lines WHERE quote_id=?`, [id]);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('quote', {
+          docNo: q.quote_no,
+          blocks: {
+            Client:   { Name: q.client_name, PIN: q.client_pin, Address: q.client_address },
+            Validity: { Date: q.date, 'Valid Until': q.valid_until, Status: q.status },
+          },
+          columns: [
+            { label: 'Description', key: 'description', weight: 3 },
+            { label: 'Qty', key: 'quantity', weight: 1, align: 'right' },
+            { label: 'Unit Price', key: 'unit_price', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+            { label: 'Total', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+          ],
+          rows: lines,
+          totals: [
+            { label: 'Subtotal', value: Number(q.subtotal||0).toLocaleString('en-KE') },
+            { label: 'VAT', value: Number(q.vat_amount||0).toLocaleString('en-KE') },
+            { label: 'GRAND TOTAL', value: `Kshs ${Number(q.total||0).toLocaleString('en-KE')}` },
+          ],
+        });
+        return ok(result);
+      }
+
+      // QSL_DebitNote_Template / QSL_CreditNote_Template — list + PDF
+      case 'debit_notes':
+      case 'credit_notes': {
+        const table = section === 'debit_notes' ? 'debit_notes' : 'credit_notes';
+        const rows = await query(
+          `SELECT n.*, c.name as client_name FROM ${table} n LEFT JOIN clients c ON n.client_id=c.id ORDER BY n.created_at DESC LIMIT 100`
+        );
+        return ok(rows);
+      }
+      case 'debit_note_pdf':
+      case 'credit_note_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const isDebit = section === 'debit_note_pdf';
+        const table   = isDebit ? 'debit_notes' : 'credit_notes';
+        const n = await queryOne(`SELECT n.*, c.name as client_name, c.kra_pin as client_pin, i.invoice_no
+                                   FROM ${table} n LEFT JOIN clients c ON n.client_id=c.id
+                                   LEFT JOIN tax_invoices i ON n.invoice_id=i.id WHERE n.id=?`, [id]);
+        if (!n) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc(isDebit ? 'debit_note' : 'credit_note', {
+          docNo: n.note_no,
+          blocks: {
+            Client: { Name: n.client_name, PIN: n.client_pin },
+            Ref:    { 'Invoice No': n.invoice_no || '—', Date: n.date },
+          },
+          columns: [{ label: 'Reason', key: 'reason', weight: 3 }, { label: 'Amount (Kshs)', key: 'amount', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') }],
+          rows: [n],
+          totals: [{ label: 'TOTAL', value: `Kshs ${Number(n.amount||0).toLocaleString('en-KE')}` }],
+        });
+        return ok(result);
+      }
+
+      // QSL_Statement_Template — derived live from tax_invoices, no new table needed
+      case 'statement_pdf': {
+        const client_id = searchParams.get('client_id');
+        if (!client_id) return err('client_id required', 400);
+        const client = await queryOne(`SELECT * FROM clients WHERE id=?`, [client_id]);
+        if (!client) return err('Client not found', 404);
+        const invoices = await query(
+          `SELECT invoice_no, date, due_date, total, status FROM tax_invoices WHERE client_id=? ORDER BY date DESC LIMIT 50`, [client_id]
+        );
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('statement', {
+          docNo: `STMT-${client.code}`,
+          blocks: {
+            Client: { Name: client.name, PIN: client.kra_pin },
+            Period: { 'As at': new Date().toLocaleDateString('en-KE'), 'Outstanding': `Kshs ${Number(client.outstanding||0).toLocaleString('en-KE')}` },
+          },
+          columns: [
+            { label: 'Invoice No', key: 'invoice_no', weight: 1.5 },
+            { label: 'Date', key: 'date', weight: 1 },
+            { label: 'Due', key: 'due_date', weight: 1 },
+            { label: 'Total (Kshs)', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+            { label: 'Status', key: 'status', weight: 1 },
+          ],
+          rows: invoices,
+          totals: [{ label: 'TOTAL OUTSTANDING', value: `Kshs ${Number(client.outstanding||0).toLocaleString('en-KE')}` }],
+        });
+        return ok(result);
+      }
+
+      // QSL_TravelClaim_Template — list + PDF
+      case 'travel_claims': {
+        const rows = await query(
+          `SELECT t.*, e.first_name||' '||e.last_name as employee_name FROM travel_claims t
+           LEFT JOIN employees e ON t.employee_id=e.id ORDER BY t.created_at DESC LIMIT 100`
+        );
+        return ok(rows);
+      }
+      case 'travel_claim_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const t = await queryOne(`SELECT t.*, e.first_name||' '||e.last_name as employee_name, e.department
+                                   FROM travel_claims t LEFT JOIN employees e ON t.employee_id=e.id WHERE t.id=?`, [id]);
+        if (!t) return err('Not found', 404);
+        const lines = await query(`SELECT * FROM travel_claim_lines WHERE claim_id=?`, [id]);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('travel_claim', {
+          docNo: t.claim_no,
+          blocks: {
+            Claimant: { Name: t.employee_name, Department: t.department },
+            Trip:     { Purpose: t.trip_purpose, Destination: t.destination, From: t.from_date, To: t.to_date },
+          },
+          columns: [
+            { label: 'Date', key: 'date', weight: 1 },
+            { label: 'Description', key: 'description', weight: 2 },
+            { label: 'Amount (Kshs)', key: 'amount', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+          ],
+          rows: lines,
+          totals: [{ label: 'TOTAL CLAIMED', value: `Kshs ${Number(t.total_amount||0).toLocaleString('en-KE')}` }],
+        });
+        return ok(result);
       }
 
       default:
@@ -981,6 +1140,79 @@ export async function POST(req) {
         }
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: `SIGN_BATCH_${signer_role.toUpperCase()}`, module: 'Finance', recordId: batch_id, newValue: { status: newStatus } });
         return ok({ signed: true, status: newStatus });
+      }
+
+      // QSL_Quote_Template — create a quotation with line items
+      case 'create_quote': {
+        const { client_id, valid_until, lines } = body;
+        if (!client_id || !lines?.length) return err('client_id and lines required', 400);
+        const s = require('../../../lib/settings');
+        const subtotal = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+        const vatRate  = await s.getNum('finance.vat_rate', 0.16);
+        const vat_amount = Math.round(subtotal * vatRate);
+        const total    = subtotal + vat_amount;
+        const id       = uuid();
+        const quote_no = `QT-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
+        await transaction(async ({ run: dbRun }) => {
+          await dbRun(
+            `INSERT INTO quotes (id,quote_no,client_id,valid_until,subtotal,vat_amount,total,created_by) VALUES (?,?,?,?,?,?,?,?)`,
+            [id, quote_no, client_id, valid_until, subtotal, vat_amount, total, auth.user.employee_id]
+          );
+          for (const l of lines) {
+            await dbRun(`INSERT INTO quote_lines (id,quote_id,description,quantity,unit_price,total) VALUES (?,?,?,?,?,?)`,
+              [uuid(), id, l.description, l.quantity, l.unit_price, l.quantity * l.unit_price]);
+          }
+        });
+        return ok({ id, quote_no, subtotal, vat_amount, total }, 201);
+      }
+
+      // QSL_DebitNote_Template / QSL_CreditNote_Template
+      case 'create_debit_note':
+      case 'create_credit_note': {
+        const isDebit = action === 'create_debit_note';
+        const { client_id, invoice_id, amount, reason } = body;
+        if (!client_id || !amount || !reason) return err('client_id, amount and reason required', 400);
+        const id = uuid();
+        const prefix  = isDebit ? 'DN' : 'CN';
+        const note_no = `${prefix}-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
+        const table   = isDebit ? 'debit_notes' : 'credit_notes';
+        await run(
+          `INSERT INTO ${table} (id,note_no,client_id,invoice_id,amount,reason,created_by) VALUES (?,?,?,?,?,?,?)`,
+          [id, note_no, client_id, invoice_id || null, amount, reason, auth.user.employee_id]
+        );
+        // Credit notes reduce, debit notes increase the client's outstanding balance
+        await run(`UPDATE clients SET outstanding = outstanding ${isDebit ? '+' : '-'} ? WHERE id=?`, [amount, client_id]);
+        return ok({ id, note_no, amount }, 201);
+      }
+
+      // QSL_TravelClaim_Template — create a travel claim with expense lines
+      case 'create_travel_claim': {
+        const { employee_id, trip_purpose, destination, from_date, to_date, lines } = body;
+        if (!employee_id || !trip_purpose || !from_date || !to_date || !lines?.length)
+          return err('employee_id, trip_purpose, from_date, to_date and lines required', 400);
+        const total_amount = lines.reduce((s, l) => s + Number(l.amount || 0), 0);
+        const id = uuid();
+        const claim_no = `TC-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
+        await transaction(async ({ run: dbRun }) => {
+          await dbRun(
+            `INSERT INTO travel_claims (id,claim_no,employee_id,trip_purpose,destination,from_date,to_date,total_amount) VALUES (?,?,?,?,?,?,?,?)`,
+            [id, claim_no, employee_id, trip_purpose, destination, from_date, to_date, total_amount]
+          );
+          for (const l of lines) {
+            await dbRun(`INSERT INTO travel_claim_lines (id,claim_id,date,description,amount) VALUES (?,?,?,?,?)`,
+              [uuid(), id, l.date || null, l.description, l.amount]);
+          }
+        });
+        return ok({ id, claim_no, total_amount }, 201);
+      }
+
+      // QSL_TravelClaim_Template — Line Manager / Finance approval
+      case 'approve_travel_claim': {
+        const { claim_id } = body;
+        if (!claim_id) return err('claim_id required', 400);
+        await run(`UPDATE travel_claims SET status='approved', approved_by=?, approved_at=datetime('now') WHERE id=?`,
+          [auth.user.employee_id, claim_id]);
+        return ok({ approved: true });
       }
 
       default:
