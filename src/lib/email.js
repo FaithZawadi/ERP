@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 
 // ── TRANSPORT ─────────────────────────────────────────────────────────────────
 function createTransport() {
-  return nodemailer.createTransporter({
+  return nodemailer.createTransport({
     host:   process.env.SMTP_HOST   || 'smtp.gmail.com',
     port:   parseInt(process.env.SMTP_PORT || '587'),
     secure: process.env.SMTP_SECURE === 'true',
@@ -80,6 +80,38 @@ async function sendPayslip(employee, payslipData, period) {
 /**
  * Send tax invoice to client.
  */
+/**
+ * Emails a quotation to a client with the actual generated PDF attached
+ * (not just an HTML summary — the real document, so the client has
+ * something to forward/print/sign). pdfPath is the absolute path returned
+ * by generateBusinessDoc('quote', ...) in pdf.js.
+ */
+async function sendQuotePdf(quote, client, lines, pdfPath, senderName) {
+  const fs = require('fs');
+  const html = `<div style="${baseStyle}max-width:600px;margin:0 auto;border:1px solid #E8ECF0;border-radius:8px;">
+    ${headerHtml(`Quotation ${quote.quote_no}`)}
+    <div style="padding:24px 28px;">
+      <p style="font-size:14px;">Dear ${client.contact_person || client.name},</p>
+      <p style="font-size:14px;">Please find attached our quotation <strong>${quote.quote_no}</strong>${quote.valid_until ? ` (valid until ${quote.valid_until})` : ''} for your review.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:16px;">
+        <tr style="background:#1B3A5C;color:#fff;"><td style="padding:10px 12px;font-weight:600;">Description</td><td style="padding:10px 12px;text-align:right;font-weight:600;">Amount (Kshs)</td></tr>
+        ${(lines||[]).map(l=>`<tr><td style="padding:8px 12px;border-bottom:1px solid #E8ECF0;">${l.description}</td><td style="padding:8px 12px;border-bottom:1px solid #E8ECF0;text-align:right;">${((l.quantity||1)*(l.unit_price||0)).toLocaleString()}</td></tr>`).join('')}
+        <tr style="background:#0D2238;"><td style="padding:12px;font-weight:800;color:#fff;">TOTAL</td><td style="padding:12px;text-align:right;font-weight:800;color:#C8960C;font-size:15px;">Kshs ${(quote.total||0).toLocaleString()}</td></tr>
+      </table>
+      <p style="font-size:13px;margin-top:18px;">Please don't hesitate to reach out with any questions.</p>
+      <p style="font-size:13px;">Kind regards,<br/><strong>${senderName || 'Qalibrated Systems Limited'}</strong></p>
+    </div>
+    ${footerHtml}
+  </div>`;
+  const attachments = [];
+  try {
+    if (pdfPath && fs.existsSync(pdfPath)) {
+      attachments.push({ filename: `Quotation_${quote.quote_no}.pdf`, content: fs.readFileSync(pdfPath), contentType: 'application/pdf' });
+    }
+  } catch { /* if the file can't be read, still send the HTML summary rather than failing outright */ }
+  return send({ to: client.email, subject: `Quotation ${quote.quote_no} — Qalibrated Systems Limited`, html, attachments });
+}
+
 async function sendInvoice(invoice, client, lines) {
   const html = `<div style="${baseStyle}max-width:600px;margin:0 auto;border:1px solid #E8ECF0;border-radius:8px;">
     ${headerHtml(`Invoice ${invoice.invoice_no}`)}
@@ -698,4 +730,4 @@ async function sendEODDebtorReportToMD(mdEmail, reportDate, fmName, entries, tot
   return send({ to: mdEmail, subject: `EOD Debtor Report — ${reportDate} — ${entries.length} accounts — Kshs ${totalOutstanding.toLocaleString('en-KE')} outstanding`, html });
 }
 
-module.exports = { send, sendPayslip, sendInvoice, sendImprestOverdueAlert, sendApprovalRequest, sendComplianceAlert, sendInvoiceReminder, sendCalibrationReminder, sendProjectPaymentReminder, sendPayablesDigest, sendDailyDebtorsList, sendEODReportReminder, sendEODReportEscalation, sendEODDebtorReportToMD };
+module.exports = { send, sendPayslip, sendInvoice, sendQuotePdf, sendImprestOverdueAlert, sendApprovalRequest, sendComplianceAlert, sendInvoiceReminder, sendCalibrationReminder, sendProjectPaymentReminder, sendPayablesDigest, sendDailyDebtorsList, sendEODReportReminder, sendEODReportEscalation, sendEODDebtorReportToMD };

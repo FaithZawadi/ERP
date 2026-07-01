@@ -41,6 +41,41 @@ export async function GET(req) {
         return ok(rows);
       }
 
+      case 'invoice_payments': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const rows = await query(
+          `SELECT p.*, e.first_name||' '||e.last_name as recorded_by_name
+           FROM invoice_payments p LEFT JOIN employees e ON p.recorded_by=e.id
+           WHERE p.invoice_id=? ORDER BY p.date DESC, p.created_at DESC`,
+          [id]
+        );
+        return ok(rows);
+      }
+
+      // TAX-PDF-001: the actual Tax Invoice (eTIMS) PDF. Same gap pattern as
+      // calibration certificates — the invoice record and its eTIMS
+      // submission were both fully wired, but generateInvoice() in pdf.js
+      // was never actually called from any route. Generated on demand here.
+      case 'invoice_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const invoice = await queryOne(
+          `SELECT ti.*, c.name as client_name, c.address as client_address, c.kra_pin as client_pin
+           FROM tax_invoices ti LEFT JOIN clients c ON ti.client_id=c.id WHERE ti.id=?`, [id]
+        );
+        if (!invoice) return err('Invoice not found', 404);
+        const lines = await query(`SELECT * FROM tax_invoice_lines WHERE invoice_id=?`, [id]);
+        const { generateInvoice, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateInvoice(
+          invoice,
+          { name: invoice.client_name, address: invoice.client_address, kra_pin: invoice.client_pin },
+          lines
+        );
+        return ok(result);
+      }
+
       case 'vat_return': {
         if (period) {
           const ret = await queryOne(`SELECT * FROM vat_returns WHERE period=?`, [period]);
@@ -88,131 +123,55 @@ export async function POST(req) {
     switch (action) {
 
       // ── Create & optionally submit tax invoice ───────────────────────────
+      // Delegates to src/lib/invoicing.js — the same path Calibration's
+      // generate_job_invoice uses, so a Tax-created invoice and a
+      // Job-created invoice go through identical MSP/VAT/eTIMS handling.
       case 'create_invoice': {
-        const { client_id, date, due_date, lines, project_id, submit_to_etims } = body;
-        if (!client_id || !lines?.length) return err('client_id and lines required', 400);
+        const { client_id, date, due_date, lines, project_id, submit_to_etims, source_quote_id } = body;
+        const { createInvoiceRecord } = require('../../../lib/invoicing');
+        const result = await createInvoiceRecord({ client_id, date, due_date, lines, project_id, submit_to_etims, source_quote_id, auth });
+        if (!result.ok) return err(result.error, result.status);
+        return ok(result.data, result.status);
+      }
 
-        const client = await queryOne(`SELECT * FROM clients WHERE id=?`, [client_id]);
-        if (!client) return err('Client not found', 404);
+      // ── Record a payment against an invoice — bank transfer, cheque,
+      // cash, or any method other than the automated M-Pesa STK callback
+      // (which records itself via the /api/integrations PUT webhook).
+      // Supports partial payments: an invoice can receive several
+      // payments over time, and payment_status/amount_paid always
+      // reflect the running total rather than a single paid/unpaid flag.
+      case 'record_payment': {
+        const { invoice_id, amount, method, reference, date, notes } = body;
+        if (!invoice_id || !amount || Number(amount) <= 0) return err('invoice_id and a positive amount are required', 400);
+        if (!method) return err('Payment method is required', 400);
 
-        // Which legal entity is this invoice issued under? Prefer the
-        // project's company (most specific — a project is the actual
-        // contracting vehicle), then the client's company, then fall back
-        // to QSL's own primary company record so invoices are never left
-        // unattributed.
-        let invoiceCompanyId = null;
-        if (project_id) {
-          const proj = await queryOne(`SELECT company_id FROM projects WHERE id=?`, [project_id]);
-          invoiceCompanyId = proj?.company_id || null;
-        }
-        if (!invoiceCompanyId) invoiceCompanyId = client.company_id || null;
-        if (!invoiceCompanyId) {
-          const primary = await queryOne(`SELECT id FROM companies WHERE is_primary=1`);
-          invoiceCompanyId = primary?.id || null;
-        }
+        const invoice = await queryOne(`SELECT id, total, amount_paid FROM tax_invoices WHERE id=?`, [invoice_id]);
+        if (!invoice) return err('Invoice not found', 404);
 
-        // STK-010/011: Minimum Selling Price enforcement — block any line
-        // priced below the catalog item's MSP floor. Only applies to lines
-        // that reference a real catalog item (item_id); free-text/service
-        // lines with no item_id are unaffected, matching how MSP is scoped
-        // in the Stores module (it's a per-item floor, not a blanket rule).
-        // Exceptions require CFO/MD approval per blueprint §7.2 — modelled
-        // here as an explicit override flag the approver must set, logged
-        // to the audit trail so it's always traceable to who authorised it.
-        for (const l of lines) {
-          if (!l.item_id) continue;
-          const item = await queryOne(`SELECT code, name, msp FROM items WHERE id=?`, [l.item_id]);
-          if (!item) continue;
-          const lineUnitPrice = l.unit_price ?? (l.amount && l.quantity ? l.amount / l.quantity : null);
-          if (item.msp > 0 && lineUnitPrice != null && lineUnitPrice < item.msp && !l.msp_override_approved_by) {
-            return err(
-              `STK-010: Unit price Kshs ${lineUnitPrice.toLocaleString('en-KE')} for "${item.name}" (${item.code}) is below the Minimum Selling Price of Kshs ${item.msp.toLocaleString('en-KE')}. CFO or MD approval is required to sell below MSP — resubmit with msp_override_approved_by set on this line.`,
-              400
-            );
-          }
-        }
+        const paymentId = uuid();
+        await run(
+          `INSERT INTO invoice_payments (id,invoice_id,amount,method,reference,date,recorded_by,notes) VALUES (?,?,?,?,?,?,?,?)`,
+          [paymentId, invoice_id, Number(amount), method, reference || null, date || new Date().toISOString().slice(0, 10), auth.user.employee_id, notes || null]
+        );
 
-        // Calculate VAT per line — standard rate is configurable (finance.vat_rate)
-        const vatRate = await require('../../../lib/settings').getNum('finance.vat_rate', 0.16);
-        const processedLines = lines.map(l => {
-          const vat = calculateVAT(l.amount || (l.quantity * l.unit_price), l.vat_category || 'A', vatRate);
-          return { ...l, ...vat, id: uuid() };
-        });
-
-        const subtotal   = processedLines.reduce((s, l) => s + l.exclusive, 0);
-        const vatAmount  = processedLines.reduce((s, l) => s + l.vat_amount, 0);
-        const total      = subtotal + vatAmount;
-
-        const invoiceId  = uuid();
-        const invoiceNo  = `INV-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
-
-        await transaction(async ({ run: dbRun }) => {
-          await dbRun(
-            `INSERT INTO tax_invoices (id,invoice_no,client_id,client_pin,company_id,date,due_date,subtotal,vat_amount,total,status,project_id,created_by)
-             VALUES (?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,
-            [invoiceId, invoiceNo, client_id, client.kra_pin, invoiceCompanyId, date, due_date, subtotal, vatAmount, total, project_id, auth.user.employee_id]
-          );
-          for (const l of processedLines) {
-            await dbRun(
-              `INSERT INTO tax_invoice_lines (id,invoice_id,item_id,description,quantity,unit_price,vat_category,vat_rate,amount,vat_amount)
-               VALUES (?,?,?,?,?,?,?,?,?,?)`,
-              [l.id, invoiceId, l.item_id || null, l.description, l.quantity||1, l.unit_price||l.exclusive, l.vat_category||'A', l.rate||0.16, l.exclusive, l.vat_amount]
-            );
-          }
-        });
-
-        // Log any MSP override on the audit trail so exceptions are always traceable
-        const overrides = lines.filter(l => l.item_id && l.msp_override_approved_by);
-        for (const l of overrides) {
-          await logAudit(query, {
-            userId: auth.user.id, userName: auth.user.name,
-            action: 'MSP_OVERRIDE_APPROVED', module: 'Tax',
-            recordId: invoiceId, newValue: { item_id: l.item_id, unit_price: l.unit_price, approved_by: l.msp_override_approved_by },
-          });
-        }
-
-        let etimsResult = null;
-        if (submit_to_etims) {
-          const invoice = { id: invoiceId, invoice_no: invoiceNo, date, total };
-          etimsResult = await submitInvoice(invoice, processedLines, client);
-
-          if (etimsResult.success) {
-            const cu_no       = etimsResult.data?.data?.rcptNo || etimsResult.data?.rcptNo;
-            const receipt_no  = etimsResult.data?.data?.intrlData || '';
-            await run(
-              `UPDATE tax_invoices SET etims_status='submitted', etims_cu_no=?, etims_receipt_no=?, etims_submitted_at=?, status='issued' WHERE id=?`,
-              [cu_no, receipt_no, new Date().toISOString(), invoiceId]
-            );
-          }
-
-          await logIntegration(query, {
-            service: 'etims', direction: 'outbound', endpoint: '/trnsSales/saveSales',
-            request: { invoice_no: invoiceNo, total }, response: etimsResult,
-            success: etimsResult.success, refId: invoiceId,
-          });
-        }
+        // Recompute from the ledger rather than incrementing in place —
+        // the source of truth is the sum of invoice_payments rows, so this
+        // stays correct even if a payment is later corrected/reversed.
+        const [{ total_paid }] = await query(`SELECT COALESCE(SUM(amount),0) as total_paid FROM invoice_payments WHERE invoice_id=?`, [invoice_id]);
+        const paymentStatus = total_paid >= invoice.total ? 'paid' : total_paid > 0 ? 'partially_paid' : 'unpaid';
+        await run(
+          `UPDATE tax_invoices SET amount_paid=?, payment_status=?, status=CASE WHEN ? >= total THEN 'paid' ELSE status END WHERE id=?`,
+          [total_paid, paymentStatus, total_paid, invoice_id]
+        );
 
         await logAudit(query, {
-          userId: auth.user.id, userName: auth.user.name,
-          action: 'CREATE_TAX_INVOICE', module: 'Tax',
-          recordId: invoiceId, newValue: { invoice_no: invoiceNo, total, client_id },
+          userId: auth.user.id, userName: auth.user.name, action: 'RECORD_INVOICE_PAYMENT', module: 'Tax',
+          recordId: invoice_id, newValue: { amount, method, reference, payment_status: paymentStatus, total_paid },
         });
 
-        // Send invoice email to client
-        let email_sent = false;
-        if (client?.email) {
-          try {
-            const { sendInvoice } = require('../../../lib/email');
-            const invoiceData = { id: invoiceId, invoice_no: invoiceNo, date, due_date, vat_amount: vatAmount, total, etims_cu_no: etimsResult?.data?.data?.rcptNo };
-            await sendInvoice(invoiceData, client, processedLines);
-            email_sent = true;
-          } catch (emailErr) {
-            console.error('[Invoice email]', emailErr.message);
-          }
-        }
-
-        return ok({ invoice_id: invoiceId, invoice_no: invoiceNo, subtotal, vat_amount: vatAmount, total, etims: etimsResult, email_sent }, 201);
+        return ok({ payment_id: paymentId, amount_paid: total_paid, balance_due: Math.max(0, invoice.total - total_paid), payment_status: paymentStatus }, 201);
       }
+
 
       // ── Compute VAT return for a period ─────────────────────────────────
       case 'compute_vat_return': {

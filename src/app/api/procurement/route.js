@@ -271,6 +271,40 @@ export async function POST(req) {
         return ok({ lpo_id: lpoId, lpo_no, total, vat, grand_total, currency: cur, fx_buffer_pct: buffer_pct, landed_cost }, 201);
       }
 
+      // STK-024B: attach a Stage 1 GRN inspection photo. Takes the image as
+      // a base64 data URL (same convention as SOPs / job photos elsewhere
+      // — the frontend's API client only ever sends JSON, so the older
+      // multipart-only `upload_grn_photo` action was never actually
+      // reachable from any UI). Appends to the existing photo set rather
+      // than replacing it, so a user can attach photos one at a time —
+      // e.g. straight from a phone camera — without losing earlier ones.
+      case 'attach_grn_photo': {
+        const { grn_id, file_name, file_data, caption } = body;
+        if (!grn_id || !file_data) return err('grn_id and file_data required', 400);
+        const match = /^data:([^;]+);base64,(.+)$/.exec(file_data);
+        if (!match) return err('file_data must be a base64 data URL', 400);
+
+        const path = require('path');
+        const fs = require('fs');
+        const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
+        const dir = path.join(UPLOAD_DIR, 'grn_photos');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const buffer = Buffer.from(match[2], 'base64');
+        const ext = path.extname(file_name || '') || '.jpg';
+        const stored = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+        fs.writeFileSync(path.join(dir, stored), buffer);
+        const url = `/uploads/grn_photos/${stored}`;
+
+        const grn = await queryOne(`SELECT photo_paths FROM grns WHERE id=?`, [grn_id]);
+        if (!grn) return err('GRN not found', 404);
+        let existing = [];
+        try { existing = JSON.parse(grn.photo_paths || '[]'); } catch { existing = []; }
+        existing.push({ url, caption: caption || null, uploaded_by: auth.user.employee_id, uploaded_at: new Date().toISOString() });
+        await run(`UPDATE grns SET photo_paths=? WHERE id=?`, [JSON.stringify(existing), grn_id]);
+
+        return ok({ url, count: existing.length }, 201);
+      }
+
       case 'create_grn': {
         const { lpo_id, stage, notes, photo_paths } = body;
         if (!lpo_id) return err('lpo_id required', 400);

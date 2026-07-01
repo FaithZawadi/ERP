@@ -26,6 +26,64 @@ const fmt = {
 // ── SHARED UI COMPONENTS ──────────────────────────────────────────────────────
 const cs = (obj) => Object.entries(obj).filter(([,v])=>v).map(([k])=>k).join(' ');
 
+// Generic "Generate PDF" button used across every module to render one of the
+// 19 QSL document templates (PR, LPO, GRN, Quote, NDA, Leave Application,
+// etc.) via the matching backend endpoint, then open the result. See
+// TEMPLATE_INTEGRATION.md for the full list of module/section/doc mappings.
+// Reads the signed-in session token directly from localStorage, used to
+// append ?token= to /uploads/... links (the upload route requires a valid
+// session — see src/app/uploads/[...path]/route.js — and window.open/
+// <img src>/<a href> can't attach an Authorization header the way fetch()
+// can). Falls back to localStorage directly rather than only trusting
+// api.getToken(), so this can never throw "is not a function" regardless
+// of which exact shape of `api` a given screen happens to be holding.
+function authToken(api) {
+  if (typeof api?.getToken === 'function') {
+    try { return api.getToken() || ''; } catch { /* fall through */ }
+  }
+  if (typeof window !== 'undefined') {
+    try { return localStorage.getItem('qsl_token') || ''; } catch { /* ignore */ }
+  }
+  return '';
+}
+
+function DocPdfButton({ api, url, label = 'PDF', variant = 'ghost' }) {
+  const [loading, setLoading] = useState(false);
+  const variants = {
+    ghost:   { background:'transparent', border:`1px solid ${T.lgrey}`, color:T.navy },
+    primary: { background:T.navy, border:'none', color:T.white },
+  };
+  return (
+    <button
+      disabled={loading}
+      onClick={async (e) => {
+        e.stopPropagation();
+        setLoading(true);
+        try {
+          const res = await api.get(url);
+          if (res?.success && res.data?.url) {
+            const fileUrl = res.data.url;
+            const sep = fileUrl.includes('?') ? '&' : '?';
+            window.open(`${fileUrl}${sep}token=${authToken(api)}`, '_blank');
+          } else {
+            alert(res?.error || 'Could not generate document');
+          }
+        } finally {
+          setLoading(false);
+        }
+      }}
+      style={{
+        ...variants[variant],
+        padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+        cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1,
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+      }}
+    >
+      📄 {loading ? 'Generating…' : label}
+    </button>
+  );
+}
+
 function Badge({ children, variant='default', size='sm' }) {
   const map = {
     green:{bg:T.greenL,color:T.green}, red:{bg:T.redL,color:T.red},
@@ -156,44 +214,6 @@ function Tabs({ tabs, active, setActive }) {
   );
 }
 
-// Generic "Generate PDF" button used across every module to render one of the
-// QSL document templates (PR, LPO, GRN, Quote, NDA, Leave Application,
-// etc.) via the matching backend endpoint, then open the result.
-function DocPdfButton({ api, url, label = 'PDF', variant = 'ghost' }) {
-  const [loading, setLoading] = useState(false);
-  const variants = {
-    ghost:   { background:'transparent', border:`1px solid ${T.lgrey}`, color:T.navy },
-    primary: { background:T.navy, border:'none', color:T.white },
-  };
-  return (
-    <button
-      disabled={loading}
-      onClick={async (e) => {
-        e.stopPropagation();
-        setLoading(true);
-        try {
-          const res = await api.get(url);
-          if (res?.success && res.data?.url) {
-            window.open(res.data.url, '_blank');
-          } else {
-            alert(res?.error || 'Could not generate document');
-          }
-        } finally {
-          setLoading(false);
-        }
-      }}
-      style={{
-        ...variants[variant],
-        padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-        cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1,
-        display: 'inline-flex', alignItems: 'center', gap: 4,
-      }}
-    >
-      📄 {loading ? 'Generating…' : label}
-    </button>
-  );
-}
-
 // ── NAV MODULES ──────────────────────────────────────────────────────────────
 const MODULES = [
   {id:'dashboard', label:'Dashboard',         icon:'📊', group:'overview'},
@@ -208,6 +228,7 @@ const MODULES = [
   {id:'assets',    label:'Fixed Assets',      icon:'🏗️', group:'core'},
   {id:'projects',  label:'Projects',          icon:'🏛️', group:'ops'},
   {id:'crm',       label:'Commercial',        icon:'🤝', group:'ops'},
+  {id:'shop',      label:'Online Shop',       icon:'🛒', group:'ops'},
   {id:'fleet',     label:'Fleet',             icon:'🚗', group:'ops'},
   {id:'hse',       label:'HSE',               icon:'🦺', group:'ops'},
   {id:'calibration',label:'Technical Department', icon:'🔬', group:'commercial'},
@@ -237,18 +258,32 @@ const MODULES = [
 // hide modules that should be visible. An explicit map is easier to audit
 // and correct than implicit derivation.
 const ROLE_MODULES = {
-  cfo:                 ['dashboard','finance','debtors','tax','assets','reports','tasks','sops','settings'],
-  store_manager:       ['dashboard','stores','requisitions','procurement','reports','tasks','sops','settings'],
+  cfo:                 ['dashboard','finance','debtors','tax','assets','reports','tasks','sops','settings','shop','requisitions','procurement','projects','ic','compliance','stores'],
+  store_manager:       ['dashboard','stores','requisitions','procurement','reports','tasks','sops','settings','shop','assets'],
   store_clerk:         ['dashboard','stores','requisitions','tasks','sops','settings'],
   procurement_officer: ['dashboard','procurement','stores','requisitions','reports','tasks','sops','settings'],
-  fleet_manager:       ['dashboard','fleet','requisitions','reports','tasks','sops','settings'],
-  hr_manager:          ['dashboard','hr','reports','tasks','sops','settings'],
-  project_manager:     ['dashboard','projects','crm','requisitions','tasks','reports','sops','settings'],
-  commercial_manager:  ['dashboard','crm','projects','requisitions','tasks','reports','sops','settings'],
-  sales_rep:           ['dashboard','crm','tasks','sops','settings'],
-  technician:          ['dashboard','calibration','inspection','requisitions','stores','fleet','tasks','sops','settings'],
-  qm:                  ['dashboard','calibration','inspection','compliance','reports','tasks','sops','settings'],
-  staff:               ['dashboard','requisitions','tasks','sops','settings'],
+  fleet_manager:       ['dashboard','fleet','requisitions','reports','tasks','sops','settings','hse','assets','stores'],
+  hr_manager:          ['dashboard','hr','reports','tasks','sops','settings','finance'],
+  project_manager:     ['dashboard','projects','crm','requisitions','tasks','reports','settings','ic','sops'],
+  commercial_manager:  ['dashboard','crm','projects','requisitions','tasks','reports','sops','settings','shop','bids','debtors'],
+  sales_rep:           ['dashboard','crm','tasks','sops','settings','shop','bids'],
+  // Technician and QM are revenue-generating roles too (calibration jobs,
+  // SRF-driven work) and their manager (QM oversees the Technical
+  // Department) — all should be able to quote a client directly, not only
+  // Commercial-side staff. 'crm' is where the Quotes tab lives.
+  technician:          ['dashboard','calibration','crm','inspection','requisitions','stores','fleet','tasks','sops','settings','hse'],
+  qm:                  ['dashboard','calibration','crm','inspection','compliance','reports','tasks','sops','settings','hse'],
+  staff:               ['dashboard','requisitions','tasks','sops','settings','stores'],
+  // Roles added in migrate-v10 — without an entry here these would fall
+  // back to "see everything" below, which is wrong for least-privilege
+  // roles like Receptionist. Each list matches that role's actual
+  // role_permissions from migrate-v10/v11.
+  accountant:          ['dashboard','finance','tax','debtors','reports','tasks','sops','settings','shop'],
+  it_admin:            ['dashboard','admin','assets','reports','tasks','sops','settings'],
+  hse_officer:         ['dashboard','hse','compliance','reports','tasks','sops','settings'],
+  bids_coordinator:    ['dashboard','bids','crm','projects','reports','tasks','sops','settings'],
+  assets_manager:      ['dashboard','assets','stores','reports','tasks','sops','settings'],
+  receptionist:        ['dashboard','requisitions','stores','tasks','sops','settings'],
 };
 
 // md and admin bypass ROLE_MODULES entirely and see every module — this
@@ -261,7 +296,7 @@ function modulesForRole(role) {
   // 'me' (My Workspace) and 'dashboard' are available to every role.
   return MODULES.filter(m => m.id === 'me' || allowed.includes(m.id));
 }
-const GROUPS={overview:'Overview',core:'Core Modules',ops:'Operations',commercial:'Commercial',governance:'Governance'};
+const GROUPS={overview:'Overview',core:'Core Modules',ops:'Operations',commercial:'Technical',governance:'Governance'};
 
 // ── SIDEBAR ──────────────────────────────────────────────────────────────────
 function Sidebar({ active, setActive, collapsed, setCollapsed, user, branding={} }) {
@@ -327,7 +362,7 @@ function DashboardHome({ api, setActive }) {
   const [analyticsLoading,setAnalyticsLoading]=useState(false);
 
   useEffect(()=>{
-    api.get('/api/reports?report=md_dashboard').then(r=>{
+    api.get('/api/reports?report=my_dashboard').then(r=>{
       if(r?.success) setData(r.data);
       setLoading(false);
     });
@@ -352,7 +387,7 @@ function DashboardHome({ api, setActive }) {
   return (
     <div>
       <Tabs tabs={[{id:'summary',label:'Executive Summary'},{id:'analytics',label:'Analytics & KPIs'}]} active={dashTab} setActive={setDashTab}/>
-      {dashTab==='summary'&&(
+      {dashTab==='summary'&&data?.role_view==='md'&&(
       <div style={{marginTop:14}}>
       {/* Alert banner */}
       {((data?.overdue_imprest?.count||0)+(data?.overdue_tasks||0)+(data?.expiring_docs||0))>0&&(
@@ -398,12 +433,213 @@ function DashboardHome({ api, setActive }) {
         <Card>
           <SectionHeader title="Quick Actions" sub="Common tasks"/>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            {[['Request Imprest','finance'],['Post Expense','projects'],['New Lead','crm'],['Raise PR','procurement'],['Check Compliance','compliance'],['Run Tax Report','tax'],['My Tasks','tasks'],['SOP Library','sops']].map(([label,mod])=>(
+            {[['Request Imprest','finance'],['Post Expense','projects'],['New Lead','crm'],['Raise PR','procurement'],['Check Compliance','compliance'],['Run Tax Report','tax']].map(([label,mod])=>(
               <button key={label} onClick={()=>setActive(mod)} style={{padding:'12px',background:T.offwt,border:`1px solid ${T.lgrey}`,borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:600,color:T.navy,textAlign:'center'}}>{label}</button>
             ))}
           </div>
         </Card>
       </div>
+      </div>
+      )}
+
+      {/* CFO — financial control dashboard */}
+      {dashTab==='summary'&&data?.role_view==='cfo'&&(
+      <div style={{marginTop:14}}>
+        {(data?.overdue_imprest?.count>0||data?.pending_payment_batches>0)&&(
+          <Alert type="warning">{data.overdue_imprest?.count>0&&`${data.overdue_imprest.count} overdue imprest (${fmt.kes(data.overdue_imprest.amount)}). `}{data.pending_payment_batches>0&&`${data.pending_payment_batches} payment batch(es) awaiting signoff.`}</Alert>
+        )}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:14}}>
+          <Stat label="Total Collected" value={`Kshs ${((data?.total_collected||0)/1e6).toFixed(1)}M`} icon="💳"/>
+          <Stat label="Total Invoiced" value={`Kshs ${((data?.total_invoiced||0)/1e6).toFixed(1)}M`} icon="🧾"/>
+          <Stat label="Total Expenses" value={`Kshs ${((data?.total_expenses||0)/1e6).toFixed(1)}M`} icon="📉"/>
+          <Stat label="Outstanding (AR)" value={`Kshs ${((data?.total_outstanding||0)/1e6).toFixed(1)}M`} icon="⚠️" variant={data?.total_outstanding>0?'amber':'green'}/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Overdue Imprest" value={data?.overdue_imprest?.count||0} icon="⏰" variant={data?.overdue_imprest?.count>0?'red':'green'}/>
+          <Stat label="Pending Imprest Requests" value={data?.pending_imprest?.count||0} icon="📝" variant={data?.pending_imprest?.count>0?'amber':'green'}/>
+          <Stat label="Payment Batches Awaiting Signoff" value={data?.pending_payment_batches||0} icon="✍️" variant={data?.pending_payment_batches>0?'amber':'green'}/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          <Card>
+            <SectionHeader title="Top Debtors" sub="Clients with outstanding balances" action={<Btn size="sm" onClick={()=>setActive('debtors')}>Full Report</Btn>}/>
+            {(data?.top_debtors||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No outstanding balances</p>:data.top_debtors.map((d,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{d.name}</span><strong style={{color:T.amber}}>{fmt.kes(d.outstanding)}</strong></div>
+            ))}
+          </Card>
+          <Card>
+            <SectionHeader title="Supplier Payments Due (7 days)" sub="Delivered LPOs awaiting payment" action={<Btn size="sm" onClick={()=>setActive('finance')}>Open Finance</Btn>}/>
+            {(data?.payments_due||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>Nothing due this week</p>:data.payments_due.map((p,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{p.name}</span><strong>{fmt.kes(p.grand_total)}</strong></div>
+            ))}
+          </Card>
+        </div>
+      </div>
+      )}
+
+      {/* Commercial Manager / Project Manager — pipeline & client dashboard */}
+      {dashTab==='summary'&&data?.role_view==='commercial'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Open Pipeline" value={data?.pipeline_count||0} sub={fmt.kes(data?.pipeline_value)} icon="🎯"/>
+          <Stat label="Outstanding Clients" value={(data?.top_clients||[]).length} icon="⚠️"/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
+          <Card>
+            <SectionHeader title="Pipeline by Stage" sub="Open leads" action={<Btn size="sm" onClick={()=>setActive('crm')}>Open Commercial</Btn>}/>
+            {(data?.by_stage||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No open leads</p>:data.by_stage.map((s,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><Badge variant="amber">{s.stage}</Badge><strong>{fmt.kes(s.value)} ({s.count})</strong></div>
+            ))}
+          </Card>
+          <Card>
+            <SectionHeader title="Top Outstanding Clients" sub="Accounts with balances due"/>
+            {(data?.top_clients||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No outstanding balances</p>:data.top_clients.map((c,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{c.name}</span><strong style={{color:T.amber}}>{fmt.kes(c.outstanding)}</strong></div>
+            ))}
+          </Card>
+        </div>
+        <Card>
+          <SectionHeader title="Team Performance" sub="Pipeline by sales rep"/>
+          <DataTable headers={['Rep','Leads','Pipeline Value','Wins']} empty="No team data yet."
+            rows={(data?.team_performance||[]).map(t=>[t.name,t.total_leads,fmt.kes(t.pipeline_value),t.wins])}/>
+        </Card>
+      </div>
+      )}
+
+      {/* Sales Representative — personal pipeline dashboard */}
+      {dashTab==='summary'&&data?.role_view==='sales_rep'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="My Open Pipeline" value={data?.my_pipeline_count||0} sub={fmt.kes(data?.my_pipeline_value)} icon="🎯"/>
+          <Stat label="My Wins" value={data?.my_won_count||0} sub={fmt.kes(data?.my_won_value)} icon="🏆" variant="green"/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          <Card>
+            <SectionHeader title="My Leads" sub="Open opportunities I own" action={<Btn size="sm" onClick={()=>setActive('crm')}>Open Commercial</Btn>}/>
+            {(data?.my_leads||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No open leads assigned to you yet.</p>:data.my_leads.map((l,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{l.company}</span><Badge variant="amber">{l.stage}</Badge><strong>{fmt.kes(l.estimated_value)}</strong></div>
+            ))}
+          </Card>
+          <Card>
+            <SectionHeader title="My Recent Client Visits" sub="Logged interactions"/>
+            {(data?.recent_visits||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No visits logged yet.</p>:data.recent_visits.map((v,i)=>(
+              <div key={i} style={{padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><strong>{v.client_name||'—'}</strong><div style={{fontSize:11,color:T.mgrey}}>{fmt.date(v.date)} — {v.summary}</div></div>
+            ))}
+          </Card>
+        </div>
+      </div>
+      )}
+
+      {/* HR Manager — people dashboard */}
+      {dashTab==='summary'&&data?.role_view==='hr'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Active Employees" value={data?.total_active||0} icon="👥"/>
+          <Stat label="Pending Leave Requests" value={data?.pending_leave||0} icon="🏖️" variant={data?.pending_leave>0?'amber':'green'}/>
+          <Stat label="Open Disciplinary Cases" value={data?.open_disciplinary||0} icon="⚖️" variant={data?.open_disciplinary>0?'red':'green'}/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          <Card>
+            <SectionHeader title="Headcount by Department" action={<Btn size="sm" onClick={()=>setActive('hr')}>Open HR</Btn>}/>
+            {(data?.headcount_by_dept||[]).map((d,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{d.department}</span><strong>{d.count}</strong></div>
+            ))}
+          </Card>
+          <Card>
+            <SectionHeader title="Pending Leave Requests" sub="Awaiting your approval"/>
+            {(data?.recent_leave_requests||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>Nothing pending.</p>:data.recent_leave_requests.map((l,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{l.employee_name}</span><span style={{fontSize:11,color:T.mgrey}}>{l.leave_type}, {l.days}d</span></div>
+            ))}
+          </Card>
+        </div>
+        {(data?.expiring_documents||[]).length>0&&(
+          <Card style={{marginTop:20}}>
+            <SectionHeader title="Employee Documents Expiring Soon"/>
+            {data.expiring_documents.map((d,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{d.name} — {d.doc_type}</span><span style={{color:T.amber}}>{fmt.date(d.expires_at)}</span></div>
+            ))}
+          </Card>
+        )}
+      </div>
+      )}
+
+      {/* Technician / Quality Manager — calibration workload dashboard */}
+      {dashTab==='summary'&&data?.role_view==='technical'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="My Open Jobs" value={(data?.my_open_jobs||[]).length} icon="🔧"/>
+          <Stat label="Certificates This Month" value={data?.certs_this_month||0} icon="📜" variant="green"/>
+          <Stat label="Pending Service Requests" value={data?.pending_srf||0} icon="📋" variant={data?.pending_srf>0?'amber':'green'}/>
+          <Stat label="Open NCRs" value={data?.open_ncr||0} icon="⚠️" variant={data?.open_ncr>0?'red':'green'}/>
+        </div>
+        <Card>
+          <SectionHeader title="My Open Jobs" sub="Scheduled field/lab work" action={<Btn size="sm" onClick={()=>setActive('calibration')}>Open Technical</Btn>}/>
+          {(data?.my_open_jobs||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>No open jobs.</p>:data.my_open_jobs.map((j,i)=>(
+            <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{j.job_no}</span><span style={{fontSize:11,color:T.mgrey}}>{fmt.date(j.scheduled_date)}</span></div>
+          ))}
+        </Card>
+      </div>
+      )}
+
+      {/* Store Manager / Clerk — inventory operations dashboard */}
+      {dashTab==='summary'&&data?.role_view==='stores'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Inventory Value" value={fmt.kes(data?.inventory_value||0)} icon="📦"/>
+          <Stat label="Low Stock Items" value={(data?.low_stock||[]).length} icon="⚠️" variant={(data?.low_stock||[]).length>0?'red':'green'}/>
+          <Stat label="Pending Transfers" value={data?.pending_transfers||0} icon="🔁" variant={data?.pending_transfers>0?'amber':'green'}/>
+          <Stat label="Pending GRNs" value={data?.pending_grn||0} icon="📥" variant={data?.pending_grn>0?'amber':'green'}/>
+        </div>
+        <Card>
+          <SectionHeader title="Low Stock Items" sub="At or below reorder level" action={<Btn size="sm" onClick={()=>setActive('stores')}>Open Stores</Btn>}/>
+          {(data?.low_stock||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>Nothing below reorder level.</p>:data.low_stock.map((s,i)=>(
+            <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{s.name}</span><strong style={{color:T.red}}>{s.quantity} (reorder at {s.reorder_level})</strong></div>
+          ))}
+        </Card>
+      </div>
+      )}
+
+      {/* Procurement Officer — purchasing pipeline dashboard */}
+      {dashTab==='summary'&&data?.role_view==='procurement'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Pending Requisitions" value={data?.pending_pr_count||0} sub={fmt.kes(data?.pending_pr_value)} icon="📝" variant={data?.pending_pr_count>0?'amber':'green'}/>
+          <Stat label="Open LPOs" value={data?.open_lpo_count||0} sub={fmt.kes(data?.open_lpo_value)} icon="🧾"/>
+        </div>
+        <Card>
+          <SectionHeader title="Pending Purchase Requisitions" action={<Btn size="sm" onClick={()=>setActive('procurement')}>Open Procurement</Btn>}/>
+          {(data?.recent_prs||[]).length===0?<p style={{color:T.mgrey,fontSize:13}}>Nothing pending.</p>:data.recent_prs.map((p,i)=>(
+            <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:`1px solid ${T.lgrey}`,fontSize:13}}><span>{p.description}</span><strong>{fmt.kes(p.amount)}</strong></div>
+          ))}
+        </Card>
+      </div>
+      )}
+
+      {/* Fleet Manager — fleet operations dashboard */}
+      {dashTab==='summary'&&data?.role_view==='fleet'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="Active Vehicles" value={data?.active_vehicles||0} icon="🚗"/>
+          <Stat label="Insurance Expiring (30d)" value={data?.expiring_documents||0} icon="📄" variant={data?.expiring_documents>0?'amber':'green'}/>
+          <Stat label="Maintenance Due (14d)" value={data?.open_maintenance||0} icon="🔧" variant={data?.open_maintenance>0?'amber':'green'}/>
+        </div>
+        <div style={{textAlign:'center',marginTop:10}}><Btn onClick={()=>setActive('fleet')}>Open Fleet Module</Btn></div>
+      </div>
+      )}
+
+      {/* Generic fallback — any role without a dedicated dashboard above */}
+      {dashTab==='summary'&&data?.role_view==='generic'&&(
+      <div style={{marginTop:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:14,marginBottom:22}}>
+          <Stat label="My Pending Tasks" value={data?.my_pending_tasks||0} icon="📋" variant={data?.my_pending_tasks>0?'amber':'green'}/>
+        </div>
+        <Card>
+          <SectionHeader title="Quick Actions"/>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            {[['My Tasks','tasks'],['SOP Library','sops']].map(([label,mod])=>(
+              <button key={label} onClick={()=>setActive(mod)} style={{padding:'12px',background:T.offwt,border:`1px solid ${T.lgrey}`,borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:600,color:T.navy,textAlign:'center'}}>{label}</button>
+            ))}
+          </div>
+        </Card>
       </div>
       )}
 
@@ -509,8 +745,8 @@ function DashboardHome({ api, setActive }) {
 }
 
 // ── FINANCE MODULE ──────────────────────────────────────────────────────────
-function Finance({ api }) {
-  const [tab,setTab]=useState('imprest');
+function Finance({ api, user }) {
+  const [tab,setTab]=useState(user?.role==='hr_manager' ? 'payroll' : 'imprest');
   const [imprest,setImprest]=useState([]);
   const [payroll,setPayroll]=useState(null);
   const [payrollEntries,setPayrollEntries]=useState([]);
@@ -539,6 +775,13 @@ function Finance({ api }) {
   const [clientsList,setClientsList]=useState([]);
   const [quoteForm,setQuoteForm]=useState({client_id:'',valid_until:'',lines:[{description:'',quantity:1,unit_price:''}]});
   const [noteForm,setNoteForm]=useState({client_id:'',amount:'',reason:''});
+  // Invoices — Finance → Documents (mirrors the Tax module's invoice
+  // register/creation so invoicing is discoverable from Finance too,
+  // instead of only living under Tax; same underlying /api/tax endpoint).
+  const [invoices,setInvoices]=useState([]);
+  const [invoiceForm,setInvoiceForm]=useState({client_id:'',date:new Date().toISOString().split('T')[0],due_date:'',source_quote_id:null,source_quote_no:null,lines:[{description:'',quantity:1,unit_price:'',vat_category:'A'}]});
+  const [paymentModal,setPaymentModal]=useState(null); // the invoice being paid, or null
+  const [paymentForm,setPaymentForm]=useState({amount:'',method:'bank_transfer',reference:'',date:new Date().toISOString().split('T')[0],notes:''});
   const [claimForm,setClaimForm]=useState({employee_id:'',trip_purpose:'',destination:'',from_date:'',to_date:'',lines:[{date:'',description:'',amount:''}]});
   const [batchSel,setBatchSel]=useState([]);
   // GL maturity — FIN-001/002/003
@@ -552,7 +795,7 @@ function Finance({ api }) {
   const [budgetYear,setBudgetYear]=useState('2026');
   const [bForm,setBForm]=useState({department:'',cost_centre:'',annual_amount:''});
   const [tForm,setTForm]=useState({scope:'',annual_target:''});
-  const [retireForm,setRetireForm]=useState({id:'',amount_accounted:'',receipt_path:''});
+  const [retireForm,setRetireForm]=useState({id:'',amount_accounted:'',file_name:'',file_data:''});
   // Treasury & Statutory — FIN-004/009/010/024/025
   const [fxRates,setFxRates]=useState([]);
   const [forexReval,setForexReval]=useState({lines:[],total_impact:0});
@@ -570,13 +813,13 @@ function Finance({ api }) {
     setLoading(true);
     if(t==='imprest'){ const r=await api.get('/api/finance?section=imprest'); if(r?.success) setImprest(r.data); }
     if(t==='documents'){
-      const [q,dn,cn,tc,cl]=await Promise.all([
+      const [q,dn,cn,tc,cl,inv]=await Promise.all([
         api.get('/api/finance?section=quotes'), api.get('/api/finance?section=debit_notes'),
         api.get('/api/finance?section=credit_notes'), api.get('/api/finance?section=travel_claims'),
-        api.get('/api/crm?section=clients')]);
+        api.get('/api/crm?section=clients'), api.get('/api/tax?section=invoices')]);
       if(q?.success)setQuotes(q.data); if(dn?.success)setDebitNotes(dn.data);
       if(cn?.success)setCreditNotes(cn.data); if(tc?.success)setTravelClaims(tc.data);
-      if(cl?.success)setClientsList(cl.data);
+      if(cl?.success)setClientsList(cl.data); if(inv?.success)setInvoices(inv.data);
       if(employees.length===0){ const e=await api.get('/api/hr?section=employees'); if(e?.success)setEmployees(e.data); }
     }
     if(t==='payroll'){ const r=await api.get('/api/finance?section=payroll&period=2026-06'); if(r?.success){setPayroll(r.data.run);setPayrollEntries(r.data.entries||[]);} }
@@ -623,6 +866,48 @@ function Finance({ api }) {
     else setMsg({type:'error',text:r?.error});
   };
 
+  const emptyInvoiceForm = () => ({client_id:'',date:new Date().toISOString().split('T')[0],due_date:'',source_quote_id:null,source_quote_no:null,lines:[{description:'',quantity:1,unit_price:'',vat_category:'A'}]});
+
+  const createInvoice = async () => {
+    const lines = invoiceForm.lines.filter(l=>l.description&&l.unit_price).map(l=>({description:l.description,quantity:parseFloat(l.quantity)||1,unit_price:parseFloat(l.unit_price),vat_category:l.vat_category||'A'}));
+    if(!invoiceForm.client_id||!lines.length) return;
+    const r = await api.post('/api/tax',{action:'create_invoice',client_id:invoiceForm.client_id,date:invoiceForm.date,due_date:invoiceForm.due_date||undefined,lines,submit_to_etims:true,source_quote_id:invoiceForm.source_quote_id||undefined});
+    if(r?.success){
+      setMsg({type:'success',text:`Invoice ${r.data.invoice_no} created — Total: ${fmt.kes(r.data.total)}${invoiceForm.source_quote_no?` (from ${invoiceForm.source_quote_no})`:''} — eTIMS: ${r.data.etims?.success?'Submitted':'Queued'}`});
+      setModal(null); setInvoiceForm(emptyInvoiceForm()); load('documents');
+    } else setMsg({type:'error',text:r?.error});
+  };
+
+  // "Convert to Invoice" on an accepted/sent Quote — pulls the quote's
+  // actual line items (not just its header, which is all the Quotations
+  // list already has) and pre-fills the Invoice form with them, so the
+  // client and every line item don't have to be re-typed by hand.
+  const convertQuoteToInvoice = async (quote) => {
+    const r = await api.get(`/api/finance?section=quote_detail&id=${quote.id}`);
+    if(!r?.success){ setMsg({type:'error',text:r?.error||'Could not load quote details'}); return; }
+    const q = r.data;
+    setInvoiceForm({
+      client_id: q.client_id,
+      date: new Date().toISOString().split('T')[0],
+      due_date: '',
+      source_quote_id: q.id,
+      source_quote_no: q.quote_no,
+      lines: (q.lines||[]).length
+        ? q.lines.map(l=>({description:l.description,quantity:l.quantity,unit_price:l.unit_price,vat_category:'A'}))
+        : [{description:'',quantity:1,unit_price:'',vat_category:'A'}],
+    });
+    setModal('invoice');
+  };
+
+  const recordPayment = async () => {
+    if(!paymentModal||!paymentForm.amount||Number(paymentForm.amount)<=0) return;
+    const r = await api.post('/api/tax',{action:'record_payment',invoice_id:paymentModal.id,amount:parseFloat(paymentForm.amount),method:paymentForm.method,reference:paymentForm.reference,date:paymentForm.date,notes:paymentForm.notes});
+    if(r?.success){
+      setMsg({type:'success',text:`Payment recorded — Balance due: ${fmt.kes(r.data.balance_due)} (${r.data.payment_status})`});
+      setPaymentModal(null); setPaymentForm({amount:'',method:'bank_transfer',reference:'',date:new Date().toISOString().split('T')[0],notes:''}); load('documents');
+    } else setMsg({type:'error',text:r?.error});
+  };
+
   const createNote = async (isDebit) => {
     if(!noteForm.client_id||!noteForm.amount||!noteForm.reason) return;
     const r = await api.post('/api/finance',{action:isDebit?'create_debit_note':'create_credit_note',client_id:noteForm.client_id,amount:parseFloat(noteForm.amount),reason:noteForm.reason});
@@ -643,9 +928,9 @@ function Finance({ api }) {
     if(r?.success) load('documents'); else setMsg({type:'error',text:r?.error});
   };
   const retireImprest = async () => {
-    if(!retireForm.id||!retireForm.amount_accounted||!retireForm.receipt_path){ setMsg({type:'error',text:'Receipt reference and amount are required (FIN-012A)'}); return; }
-    const r=await api.put('/api/finance',{action:'account_imprest',id:retireForm.id,amount_accounted:parseFloat(retireForm.amount_accounted),receipt_path:retireForm.receipt_path});
-    if(r?.success){setMsg({type:r.data.spot_check?'warning':'success',text:r.data.spot_check?'Retired — flagged for FM spot-check':'Imprest retired'});setModal(null);setRetireForm({id:'',amount_accounted:'',receipt_path:''});load('imprest');}
+    if(!retireForm.id||!retireForm.amount_accounted||!retireForm.file_data){ setMsg({type:'error',text:'Receipt photo and amount are required (FIN-012A)'}); return; }
+    const r=await api.put('/api/finance',{action:'account_imprest',id:retireForm.id,amount_accounted:parseFloat(retireForm.amount_accounted),file_name:retireForm.file_name,file_data:retireForm.file_data});
+    if(r?.success){setMsg({type:r.data.spot_check?'warning':'success',text:r.data.spot_check?'Retired — flagged for FM spot-check':'Imprest retired'});setModal(null);setRetireForm({id:'',amount_accounted:'',file_name:'',file_data:''});load('imprest');}
     else setMsg({type:'error',text:r?.error});
   };
 
@@ -723,7 +1008,19 @@ function Finance({ api }) {
   const loadRemit = async (p) => { setRemitPeriod(p); const r=await api.get(`/api/finance?section=remittance&period=${p}`); if(r?.success)setRemittance(r.data); };
   const loadP9 = async (emp) => { setP9Emp(emp); if(!emp){setP9(null);return;} const r=await api.get(`/api/finance?section=p9&employee_id=${emp}&year=2026`); if(r?.success)setP9(r.data); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'documents',label:'Documents'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'}];
+  // HR Manager reaches Finance for exactly one reason — running payroll
+  // (hr.payroll_run/hr.payroll_approve, see migrate-v10) — not for AP
+  // payments, treasury, or the general ledger. This codebase has no
+  // generic per-tab permission system, so rather than either leaving HR
+  // Manager unable to reach Payroll at all, or granting them the whole of
+  // Finance (bank reconciliation, payment authority, treasury — all well
+  // outside an HR role), scope the tab list directly by role here. Every
+  // other role that reaches Finance (CFO, Accountant) is meant to see all
+  // of it.
+  const allTabs=[{id:'imprest',label:'Imprest Tracker'},{id:'documents',label:'Documents'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'}];
+  const tabs = user?.role === 'hr_manager'
+    ? allTabs.filter(t => ['payroll','documents'].includes(t.id))
+    : allTabs;
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -734,20 +1031,47 @@ function Finance({ api }) {
 
       {!loading&&tab==='documents'&&(
         <>
-          <Tabs tabs={[{id:'quotes',label:'Quotations'},{id:'debit_notes',label:'Debit Notes'},{id:'credit_notes',label:'Credit Notes'},{id:'travel_claims',label:'Travel Claims'}]} active={docTab} setActive={setDocTab}/>
+          <Tabs tabs={[{id:'quotes',label:'Quotations'},{id:'invoices',label:'Invoices'},{id:'debit_notes',label:'Debit Notes'},{id:'credit_notes',label:'Credit Notes'},{id:'travel_claims',label:'Travel Claims'}]} active={docTab} setActive={setDocTab}/>
 
           {docTab==='quotes'&&(<>
             <SectionHeader title="Quotations" action={<Btn onClick={()=>setModal('quote')}>+ New Quote</Btn>}/>
             <Card style={{padding:0,overflow:'hidden'}}>
-              <DataTable headers={['Quote No','Client','Subtotal','VAT','Total','Status','Date','']}
+              <DataTable headers={['Quote No','Client','Subtotal','VAT','Total','Status','Date','','']}
                 rows={quotes.map(q=>[
                   <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{q.quote_no}</span>,
                   q.client_name, fmt.kes(q.subtotal), fmt.kes(q.vat_amount),
                   <strong>{fmt.kes(q.total)}</strong>,
-                  <Badge variant={q.status==='accepted'?'green':'amber'}>{q.status}</Badge>,
+                  <Badge variant={q.status==='invoiced'?'blue':q.status==='accepted'?'green':'amber'}>{q.status}</Badge>,
                   fmt.date(q.created_at),
+                  q.status==='invoiced'?<span style={{fontSize:11,color:T.mgrey}}>Invoiced</span>:<Btn size="sm" variant="ghost" onClick={()=>convertQuoteToInvoice(q)}>Convert to Invoice</Btn>,
                   <DocPdfButton api={api} url={`/api/finance?section=quote_pdf&id=${q.id}`}/>,
                 ])}
+              />
+            </Card>
+          </>)}
+
+          {docTab==='invoices'&&(<>
+            <SectionHeader title="Invoices" action={<Btn onClick={()=>{setInvoiceForm(emptyInvoiceForm());setModal('invoice');}}>+ Create Invoice</Btn>}/>
+            <Alert type="info">Invoices created here go through the same KRA eTIMS submission as Tax → Tax Invoices — this is the same register, just reachable from Finance too.</Alert>
+            <Card style={{padding:0,overflow:'hidden'}}>
+              <DataTable headers={['Invoice No','Client','Total','Paid','Balance','Payment Status','Date','']}
+                rows={invoices.map(i=>{
+                  const balance = Math.max(0, (i.total||0) - (i.amount_paid||0));
+                  const payStatus = i.payment_status || (i.status==='paid'?'paid':'unpaid');
+                  return [
+                    <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{i.invoice_no}</span>,
+                    i.client_name,
+                    <strong>{fmt.kes(i.total)}</strong>,
+                    fmt.kes(i.amount_paid||0),
+                    <strong style={{color:balance>0?T.red:T.green}}>{fmt.kes(balance)}</strong>,
+                    <Badge variant={payStatus==='paid'?'green':payStatus==='partially_paid'?'amber':'default'}>{payStatus.replace('_',' ')}</Badge>,
+                    fmt.date(i.date),
+                    <div style={{display:'flex',gap:4}}>
+                      {payStatus!=='paid'&&<Btn size="sm" onClick={()=>{setPaymentModal(i);setPaymentForm({amount:balance||'',method:'bank_transfer',reference:'',date:new Date().toISOString().split('T')[0],notes:''});}}>Record Payment</Btn>}
+                      <DocPdfButton api={api} url={`/api/tax?section=invoice_pdf&id=${i.id}`}/>
+                    </div>,
+                  ];
+                })}
               />
             </Card>
           </>)}
@@ -812,6 +1136,57 @@ function Finance({ api }) {
             </Modal>
           )}
 
+          {modal==='invoice'&&(
+            <Modal title={invoiceForm.source_quote_no?`Create Invoice — from ${invoiceForm.source_quote_no}`:'Create Invoice'} onClose={()=>{setModal(null);setInvoiceForm(emptyInvoiceForm());}} width={600}>
+              <Alert type="info">Invoice will be automatically submitted to KRA eTIMS on creation.</Alert>
+              <Select label="Client" value={invoiceForm.client_id} onChange={v=>setInvoiceForm({...invoiceForm,client_id:v})} required options={[{value:'',label:'Select…'},...clientsList.map(c=>({value:c.id,label:c.name}))]}/>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                <Input label="Invoice Date" value={invoiceForm.date} onChange={v=>setInvoiceForm({...invoiceForm,date:v})} type="date" required/>
+                <Input label="Due Date" value={invoiceForm.due_date} onChange={v=>setInvoiceForm({...invoiceForm,due_date:v})} type="date"/>
+              </div>
+              {invoiceForm.lines.map((l,idx)=>(
+                <div key={idx} style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:8,marginBottom:6}}>
+                  <Input label="Description" value={l.description} onChange={v=>{const ls=[...invoiceForm.lines];ls[idx]={...l,description:v};setInvoiceForm({...invoiceForm,lines:ls});}}/>
+                  <Input label="Qty" value={l.quantity} onChange={v=>{const ls=[...invoiceForm.lines];ls[idx]={...l,quantity:v};setInvoiceForm({...invoiceForm,lines:ls});}} type="number"/>
+                  <Input label="Unit Price" value={l.unit_price} onChange={v=>{const ls=[...invoiceForm.lines];ls[idx]={...l,unit_price:v};setInvoiceForm({...invoiceForm,lines:ls});}} type="number"/>
+                </div>
+              ))}
+              <Btn size="sm" variant="ghost" onClick={()=>setInvoiceForm({...invoiceForm,lines:[...invoiceForm.lines,{description:'',quantity:1,unit_price:'',vat_category:'A'}]})}>+ Add Line</Btn>
+              {invoiceForm.lines.some(l=>l.unit_price)&&(()=>{
+                const subtotal=invoiceForm.lines.reduce((s,l)=>s+((parseFloat(l.quantity)||0)*(parseFloat(l.unit_price)||0)),0);
+                const vat=Math.round(subtotal*0.16);
+                return (
+                  <div style={{background:T.offwt,padding:'12px 14px',borderRadius:8,marginTop:10,marginBottom:4}}>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:13}}><span>Subtotal:</span><strong>{fmt.kes(subtotal)}</strong></div>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:T.red}}><span>VAT (16%):</span><strong>{fmt.kes(vat)}</strong></div>
+                    <div style={{display:'flex',justifyContent:'space-between',fontSize:14,fontWeight:700,borderTop:`1px solid ${T.lgrey}`,marginTop:8,paddingTop:8}}><span>Total:</span><span style={{color:T.navy}}>{fmt.kes(subtotal+vat)}</span></div>
+                  </div>
+                );
+              })()}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}>
+                <Btn variant="ghost" onClick={()=>{setModal(null);setInvoiceForm(emptyInvoiceForm());}}>Cancel</Btn>
+                <Btn onClick={createInvoice} disabled={!invoiceForm.client_id||!invoiceForm.lines.some(l=>l.description&&l.unit_price)}>Create & Submit to eTIMS</Btn>
+              </div>
+            </Modal>
+          )}
+
+          {paymentModal&&(
+            <Modal title={`Record Payment — ${paymentModal.invoice_no}`} onClose={()=>setPaymentModal(null)}>
+              <Alert type="info">Total: {fmt.kes(paymentModal.total)} · Already paid: {fmt.kes(paymentModal.amount_paid||0)} · Balance due: {fmt.kes(Math.max(0,(paymentModal.total||0)-(paymentModal.amount_paid||0)))}</Alert>
+              <Input label="Amount Received (Kshs)" value={paymentForm.amount} onChange={v=>setPaymentForm({...paymentForm,amount:v})} type="number" required/>
+              <Select label="Method" value={paymentForm.method} onChange={v=>setPaymentForm({...paymentForm,method:v})} options={[
+                {value:'bank_transfer',label:'Bank Transfer'},{value:'cheque',label:'Cheque'},{value:'cash',label:'Cash'},{value:'mpesa',label:'M-Pesa (manual entry)'},{value:'other',label:'Other'},
+              ]}/>
+              <Input label="Reference (txn ID / cheque no.)" value={paymentForm.reference} onChange={v=>setPaymentForm({...paymentForm,reference:v})}/>
+              <Input label="Date Received" value={paymentForm.date} onChange={v=>setPaymentForm({...paymentForm,date:v})} type="date" required/>
+              <Input label="Notes (optional)" value={paymentForm.notes} onChange={v=>setPaymentForm({...paymentForm,notes:v})}/>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+                <Btn variant="ghost" onClick={()=>setPaymentModal(null)}>Cancel</Btn>
+                <Btn onClick={recordPayment} disabled={!paymentForm.amount||Number(paymentForm.amount)<=0}>Record Payment</Btn>
+              </div>
+            </Modal>
+          )}
+
           {(modal==='debit_note'||modal==='credit_note')&&(
             <Modal title={modal==='debit_note'?'New Debit Note':'New Credit Note'} onClose={()=>setModal(null)}>
               <Select label="Client" value={noteForm.client_id} onChange={v=>setNoteForm({...noteForm,client_id:v})} required options={[{value:'',label:'Select…'},...clientsList.map(c=>({value:c.id,label:c.name}))]}/>
@@ -860,7 +1235,7 @@ function Finance({ api }) {
                 <Badge variant={i.status==='CONVERTED'||i.status==='FALSE_RECEIPT'?'red':i.status==='deducted'?'purple':i.status==='accounted'?'green':i.status==='released'?'blue':'amber'}>{i.status}{i.spot_check?' ⚑':''}</Badge>,
                 i.status==='requested'?<Btn size="sm" onClick={()=>impAction('approve_imprest_request',i.id)}>Approve</Btn>
                 :i.status==='approved'?<Btn size="sm" onClick={()=>impAction('release_imprest',i.id)}>Release</Btn>
-                :i.status==='released'?<Btn size="sm" onClick={()=>{setRetireForm({id:i.id,amount_accounted:String(i.amount),receipt_path:''});setModal('retire');}}>Retire</Btn>
+                :i.status==='released'?<Btn size="sm" onClick={()=>{setRetireForm({id:i.id,amount_accounted:String(i.amount),file_name:'',file_data:''});setModal('retire');}}>Retire</Btn>
                 :(i.status==='accounted'&&i.spot_check)?<div style={{display:'flex',gap:4}}><Btn size="sm" variant="ghost" onClick={()=>impAction('verify_receipt',i.id)}>Verify</Btn><Btn size="sm" variant="danger" onClick={()=>impAction('flag_false_receipt',i.id,{reason:'Spot-check failed'})}>False</Btn></div>
                 :'—',
                 <DocPdfButton api={api} url={`/api/finance?section=imprest_pdf&id=${i.id}`}/>,
@@ -919,7 +1294,7 @@ function Finance({ api }) {
               <SectionHeader title="Payroll Register" sub="HR-011 bank payment file export"
                 action={<div style={{display:'flex',gap:6,flexWrap:'wrap'}}>{['KCB','EQUITY','NCBA','CO-OP','ALL'].map(bk=><Btn key={bk} size="sm" variant="ghost" onClick={()=>downloadBankFile(bk)}>⬇ {bk}</Btn>)}</div>}/>
               <Card style={{padding:0,overflow:'hidden'}}>
-                <DataTable headers={['Employee','Dept','Basic','Overtime','Gross','PAYE','NSSF','SHA','HELB','Net Pay']}
+                <DataTable headers={['Employee','Dept','Basic','Overtime','Gross','PAYE','NSSF','SHA','HELB','Net Pay','']}
                   rows={payrollEntries.map(e=>[
                     <strong>{e.name}</strong>,
                     <Badge variant="navy">{e.department}</Badge>,
@@ -931,6 +1306,7 @@ function Finance({ api }) {
                     fmt.kes(e.nhif),
                     e.helb?<span style={{color:T.amber}}>{fmt.kes(e.helb)}</span>:'—',
                     <strong style={{color:T.green}}>{fmt.kes(e.net_pay)}</strong>,
+                    <DocPdfButton api={api} label="Payslip" url={`/api/finance?section=payslip_pdf&entry_id=${e.id}`}/>,
                   ])}
                 />
               </Card>
@@ -984,6 +1360,7 @@ function Finance({ api }) {
           <label style={{fontSize:12,fontWeight:600,color:T.dgrey}}>Period:</label>
           <input type="month" value={closePeriod} onChange={e=>reloadMonthEnd(e.target.value)} style={{padding:'7px 10px',border:`1px solid ${T.lgrey}`,borderRadius:6,fontSize:13}}/>
           <Badge variant={monthEnd.status==='closed'?'green':monthEnd.status==='open'?'amber':'default'}>{monthEnd.status}</Badge>
+          <DocPdfButton api={api} label="Download P&L Statement" variant="primary" url={`/api/finance?section=pl_statement_pdf&period=${closePeriod}`}/>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
           <Card>
@@ -1187,8 +1564,14 @@ function Finance({ api }) {
         <Modal title="Retire Imprest — receipt required (FIN-012A)" onClose={()=>setModal(null)} width={480}>
           <Alert type="info">A receipt photo/PDF is mandatory before claiming. ~20% of retirements are auto-flagged for a Finance Manager spot-check.</Alert>
           <Input label="Amount Accounted (Kshs)" type="number" value={retireForm.amount_accounted} onChange={v=>setRetireForm({...retireForm,amount_accounted:v})} required/>
-          <Input label="Receipt reference / URL" value={retireForm.receipt_path} onChange={v=>setRetireForm({...retireForm,receipt_path:v})} required placeholder="uploaded receipt path or URL"/>
-          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={retireImprest} disabled={!retireForm.amount_accounted||!retireForm.receipt_path}>Retire</Btn></div>
+          <label style={{display:'block',fontSize:12,fontWeight:600,color:T.dgrey,marginBottom:6}}>Receipt Photo or PDF <span style={{color:T.red}}>*</span></label>
+          <p style={{fontSize:11.5,color:T.mgrey,marginBottom:8}}>Take a photo with your camera, or choose one from your gallery / files.</p>
+          <input type="file" accept="image/*,.pdf" capture="environment" onChange={e=>{const f=e.target.files?.[0]; if(!f) return; const reader=new FileReader(); reader.onload=()=>setRetireForm(rf=>({...rf,file_name:f.name,file_data:reader.result})); reader.readAsDataURL(f);}} style={{fontSize:13,display:'block',marginBottom:10}}/>
+          {retireForm.file_data&&(retireForm.file_name?.toLowerCase().endsWith('.pdf')
+            ? <div style={{fontSize:12,color:T.green,marginBottom:10}}>✓ {retireForm.file_name} attached</div>
+            : <img src={retireForm.file_data} alt="receipt preview" style={{width:'100%',maxHeight:200,objectFit:'contain',borderRadius:8,border:`1px solid ${T.lgrey}`,marginBottom:10}}/>
+          )}
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={retireImprest} disabled={!retireForm.amount_accounted||!retireForm.file_data}>Retire</Btn></div>
         </Modal>
       )}
 
@@ -1351,7 +1734,7 @@ function TaxModule({ api }) {
           <Alert type="info"><strong>KRA eTIMS:</strong> All invoices are automatically submitted to KRA eTIMS on creation. The CU receipt number confirms KRA acceptance.</Alert>
           <SectionHeader title="Tax Invoice Register" action={<Btn onClick={()=>setModal('invoice')}>+ Create Invoice</Btn>}/>
           {loading?<Loading/>:<Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Invoice No','Client','Date','Subtotal','VAT (16%)','Total','eTIMS Status']}
+            <DataTable headers={['Invoice No','Client','Date','Subtotal','VAT (16%)','Total','eTIMS Status','']}
               rows={invoices.map(i=>[
                 <span style={{fontFamily:'monospace',fontSize:11,fontWeight:600}}>{i.invoice_no}</span>,
                 <strong style={{fontSize:12}}>{i.client_name}</strong>,
@@ -1360,6 +1743,7 @@ function TaxModule({ api }) {
                 <span style={{color:T.red}}>{fmt.kes(i.vat_amount)}</span>,
                 <strong>{fmt.kes(i.total)}</strong>,
                 <Badge variant={i.etims_status==='submitted'?'green':'amber'}>{i.etims_status||'pending'}</Badge>,
+                <DocPdfButton api={api} url={`/api/tax?section=invoice_pdf&id=${i.id}`}/>,
               ])}
             />
           </Card>}
@@ -1712,7 +2096,7 @@ function Integrations({ api }) {
   return (
     <div>
       {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-      <Tabs tabs={[{id:'status',label:'Integration Status'},{id:'etims',label:'KRA eTIMS'},{id:'ppip',label:'PPIP Tenders'},{id:'mpesa',label:'M-PESA'},{id:'config',label:'Configuration'}]} active={tab} setActive={setTab}/>
+      <Tabs tabs={[{id:'status',label:'Integration Status'},{id:'etims',label:'KRA eTIMS'},{id:'ppip',label:'PPIP Tenders'},{id:'mpesa',label:'M-PESA'},{id:'banking',label:'Banking'},{id:'config',label:'Configuration'}]} active={tab} setActive={setTab}/>
 
       {tab==='status'&&(
         <>
@@ -1803,6 +2187,27 @@ function Integrations({ api }) {
           </Card>
         </div>
       )}
+
+      {tab==='banking'&&(<>
+        <Alert type="info">Account details and API credentials are managed under Administration → Settings → Banking. Connections show as "Not connected" until live API credentials are entered there — these are bank-issued and can't be guessed or defaulted.</Alert>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:16}}>
+          {[
+            {name:'KCB', full:'Kenya Commercial Bank', portal:'KCB Buni API', color:'#00833E'},
+            {name:'Sidian', full:'Sidian Bank', portal:'Sidian Open Banking API', color:'#003DA5'},
+            {name:'Family', full:'Family Bank', portal:'Family Bank API Gateway', color:'#8B1538'},
+          ].map(b=>(
+            <Card key={b.name}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+                <div style={{width:36,height:36,borderRadius:8,background:b.color,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:13}}>{b.name[0]}</div>
+                <div><div style={{fontWeight:700,fontSize:13,color:T.navy}}>{b.name}</div><div style={{fontSize:10,color:T.mgrey}}>{b.full}</div></div>
+              </div>
+              <div style={{fontSize:11,color:T.mgrey,marginBottom:8}}>Integration: {b.portal}</div>
+              <Badge variant="amber">Not connected</Badge>
+              <p style={{fontSize:11,color:T.mgrey,marginTop:10}}>Add account number and API key in Settings → Banking to enable balance lookups and statement sync.</p>
+            </Card>
+          ))}
+        </div>
+      </>)}
 
       {tab==='config'&&(
         <Card>
@@ -2285,6 +2690,9 @@ function Procurement({ api }) {
   const [modal,setModal]=useState(null);
   const [form,setForm]=useState({description:'',department:'Engineering',amount:'',purpose:''});
   const [msg,setMsg]=useState(null);
+  const [photoGrn,setPhotoGrn]=useState(null); // the GRN currently open in the photo-upload modal
+  const [photoCapture,setPhotoCapture]=useState({caption:'',file_name:'',file_data:''});
+  const [uploadingPhoto,setUploadingPhoto]=useState(false);
 
   const load = (t=tab) => {
     setLoading(true);
@@ -2296,6 +2704,23 @@ function Procurement({ api }) {
   };
 
   useEffect(()=>{ load(); },[tab]);
+
+  // STK-024B: real camera/gallery photo capture for GRN Stage 1 inspection
+  // evidence — replaces what used to be a dead-end (no upload UI existed
+  // at all; the field just showed a permanent "Missing" badge).
+  const onGrnPhotoFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => setPhotoCapture(p=>({...p,file_name:file.name,file_data:reader.result}));
+    reader.readAsDataURL(file);
+  };
+  const uploadGrnPhoto = async () => {
+    if(!photoGrn||!photoCapture.file_data) return;
+    setUploadingPhoto(true);
+    const r = await api.post('/api/procurement', { action:'attach_grn_photo', grn_id: photoGrn.id, caption: photoCapture.caption, file_name: photoCapture.file_name, file_data: photoCapture.file_data });
+    setUploadingPhoto(false);
+    if(r?.success){ setMsg({type:'success',text:`Photo attached (${r.data.count} total)`}); setPhotoCapture({caption:'',file_name:'',file_data:''}); load('grns'); }
+    else setMsg({type:'error',text:r?.error});
+  };
 
   const createPR = async () => {
     const r=await api.post('/api/procurement',{action:'create_pr',...form,amount:parseFloat(form.amount)});
@@ -2355,21 +2780,40 @@ function Procurement({ api }) {
           <Alert type="warning"><strong>STK-020/021/024B:</strong> Stage 1 physical inspection + photo upload BEFORE Stage 2 system GRN. System enforces this — no bypass.</Alert>
           <Card style={{padding:0,overflow:'hidden'}}>
             <DataTable headers={['GRN No','LPO','Supplier','Date','Stage 1','Photo','Stage 2','Status','']}
-              rows={grns.map(g=>[
+              rows={grns.map(g=>{
+                let photoCount = 0;
+                try { photoCount = JSON.parse(g.photo_paths||'[]').length; } catch {}
+                return [
                 <strong style={{fontFamily:'monospace',fontSize:11}}>{g.grn_no}</strong>,
                 g.lpo_no,
                 g.supplier_name,
                 fmt.date(g.date),
                 g.stage1_done?<Badge variant="green">✅ Done</Badge>:<Badge variant="amber">Pending</Badge>,
-                g.photo_paths&&g.photo_paths!=='[]'?<Badge variant="green">✅ Uploaded</Badge>:<Badge variant="red">Missing</Badge>,
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  {photoCount>0?<Badge variant="green">✅ {photoCount} photo{photoCount>1?'s':''}</Badge>:<Badge variant="red">Missing</Badge>}
+                  <Btn size="sm" variant="ghost" onClick={()=>{setPhotoGrn(g);setPhotoCapture({caption:'',file_name:'',file_data:''});}}>📷 Add Photo</Btn>
+                </div>,
                 g.stage2_done?<Badge variant="green">✅ Done</Badge>:<Badge variant="default">Awaiting</Badge>,
                 <Badge variant={g.status==='complete'?'green':'amber'}>{g.status}</Badge>,
                 <DocPdfButton api={api} url={`/api/procurement?section=grn_pdf&id=${g.id}`}/>,
-              ])}
+              ];})}
             />
           </Card>
+          {photoGrn&&(
+            <Modal title={`Photo Evidence — ${photoGrn.grn_no}`} onClose={()=>setPhotoGrn(null)} width={480}>
+              <p style={{fontSize:12.5,color:T.mgrey,marginBottom:14}}>Take a photo with your camera, or choose one from your gallery — STK-024B requires photographic evidence of goods received before Stage 2 can be raised.</p>
+              <input type="file" accept="image/*" capture="environment" onChange={e=>{const f=e.target.files?.[0]; if(f) onGrnPhotoFile(f);}} style={{fontSize:13,display:'block',marginBottom:12}}/>
+              {photoCapture.file_data&&<img src={photoCapture.file_data} alt="preview" style={{width:'100%',maxHeight:220,objectFit:'contain',borderRadius:8,border:`1px solid ${T.lgrey}`,marginBottom:12}}/>}
+              <Input label="Caption (optional)" value={photoCapture.caption} onChange={v=>setPhotoCapture({...photoCapture,caption:v})} placeholder="e.g. Pallet of 20kg masses, as delivered"/>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+                <Btn variant="ghost" onClick={()=>setPhotoGrn(null)}>Close</Btn>
+                <Btn onClick={uploadGrnPhoto} disabled={!photoCapture.file_data||uploadingPhoto}>{uploadingPhoto?'Uploading…':'Upload Photo'}</Btn>
+              </div>
+            </Modal>
+          )}
         </>
       )}
+
 
       {!loading&&tab==='suppliers'&&(
         <Card style={{padding:0,overflow:'hidden'}}>
@@ -2426,8 +2870,11 @@ function Reports({ api, user }) {
     setExportMsg(null);
     const r=await api.post('/api/reports',{action:'export',report,format,...extra});
     setExporting(null);
-    if(r?.success){setExportMsg({type:'success',text:`✅ ${format.toUpperCase()} exported — ${r.data.url}`});}
-    else setExportMsg({type:'error',text:r?.error||'Export failed'});
+    if(r?.success && r.data?.url){
+      const sep = r.data.url.includes('?') ? '&' : '?';
+      window.open(`${r.data.url}${sep}token=${authToken(api)}`, '_blank');
+      setExportMsg({type:'success',text:`${format.toUpperCase()} ready — ${r.data.filename||'download'} opened in a new tab.`});
+    } else setExportMsg({type:'error',text:r?.error||'Export failed'});
   };
 
   useEffect(()=>{ api.get('/api/reports?report=md_dashboard').then(r=>{ if(r?.success) setData(r.data); }); },[]);
@@ -2937,6 +3384,23 @@ const SETTINGS_REGISTRY = [
     {key:'alerts.insurance_alert_days',   label:'Vehicle Insurance',  type:'number', def:'30'},
     {key:'alerts.tender_alert_days',      label:'Tender Deadline',    type:'number', def:'14'},
   ]},
+  { category:'banking', label:'Banking — KCB / Sidian / Family Bank', help:'Account details and API credentials for bank integrations. Leave API fields blank until you have live credentials from each bank — connections will show as "Not connected" until then.', fields:[
+    {key:'banking.kcb_account_name',   label:'KCB — Account Name',    type:'text', def:'Qalibrated Systems Limited'},
+    {key:'banking.kcb_account_number', label:'KCB — Account Number',  type:'text', def:''},
+    {key:'banking.kcb_api_key',        label:'KCB Buni API Key',      type:'text', def:''},
+    {key:'banking.kcb_environment',    label:'KCB API Environment',   type:'select', options:['sandbox','production'], def:'sandbox'},
+    {key:'banking.sidian_account_name',   label:'Sidian Bank — Account Name',   type:'text', def:'Qalibrated Systems Limited'},
+    {key:'banking.sidian_account_number', label:'Sidian Bank — Account Number', type:'text', def:''},
+    {key:'banking.sidian_api_key',        label:'Sidian API Key',              type:'text', def:''},
+    {key:'banking.family_account_name',   label:'Family Bank — Account Name',   type:'text', def:'Qalibrated Systems Limited'},
+    {key:'banking.family_account_number', label:'Family Bank — Account Number', type:'text', def:''},
+    {key:'banking.family_api_key',        label:'Family Bank API Key',         type:'text', def:''},
+  ]},
+  { category:'cpd_lms', label:'CPD / Learning Platform APIs (paid tiers only)', help:"None of the free CPD platforms (Alison, Coursera, edX, Khan Academy, etc.) offer a free public API for pulling individual completion data — staff log activity manually with a verification link instead (see the CPD tab in HR). These fields only apply if/when QSL signs up for a platform's paid business/API tier — Alison for Business starts at $99/month and includes API + SSO access. Leave blank otherwise.", fields:[
+    {key:'cpd.alison_business_api_key', label:'Alison for Business — API Key',  type:'text', def:''},
+    {key:'cpd.alison_org_id',           label:'Alison — Organisation ID',       type:'text', def:''},
+    {key:'cpd.linkedin_learning_api_key', label:'LinkedIn Learning — API Key (org admin)', type:'text', def:''},
+  ]},
   { category:'commission', label:'Sales Commission Tiers (advanced)', help:'JSON array of {from,to,rate} bands on YTD % of target (COM-001).', fields:[
     {key:'commission.tiers', label:'Tiers (JSON)', type:'json', def:'[{"from":0,"to":70,"rate":0},{"from":70,"to":80,"rate":0.01},{"from":80,"to":90,"rate":0.03},{"from":90,"to":100,"rate":0.05},{"from":100,"to":9999,"rate":0.07}]'},
   ]},
@@ -2959,6 +3423,11 @@ function AdminModule({ api, user }) {
   const [modal,setModal]=useState(null);
   const [roleDetail,setRoleDetail]=useState(null);
   const [form,setForm]=useState({});
+  const [employees,setEmployees]=useState([]);
+  const [userForm,setUserForm]=useState({employee_id:'',email:'',password:'',role:'staff',role_codes:[]});
+  const [roleAssign,setRoleAssign]=useState({});
+  const [docTemplates,setDocTemplates]=useState([]);
+  const [tplEdit,setTplEdit]=useState(null); // currently-open template editor form
 
   const loadCompanies = async () => {
     setLoading(true);
@@ -2979,8 +3448,66 @@ function AdminModule({ api, user }) {
     else setMsg({type:'error',text:r?.error||'Failed'});
   };
 
+  const createUser = async () => {
+    if(!userForm.employee_id||!userForm.email||!userForm.password){ setMsg({type:'error',text:'Employee, email and password are required'}); return; }
+    const r = await api.post('/api/admin', {action:'create_user', ...userForm});
+    if(r?.success){ setMsg({type:'success',text:`User account created for ${userForm.email}`}); setModal(null); setUserForm({employee_id:'',email:'',password:'',role:'staff',role_codes:[]}); load('users'); }
+    else setMsg({type:'error',text:r?.error||'Failed to create user'});
+  };
+
+  const assignRole = async (user_id) => {
+    const role_id = roleAssign[user_id];
+    if(!role_id) return;
+    const r = await api.post('/api/admin', {action:'assign_user_role', user_id, role_id});
+    if(r?.success){ setMsg({type:'success',text:'Role assigned'}); load('users'); }
+    else setMsg({type:'error',text:r?.error||'Failed'});
+  };
+
+  const removeRole = async (user_id, role_id) => {
+    const r = await api.post('/api/admin', {action:'remove_user_role', user_id, role_id});
+    if(r?.success) load('users'); else setMsg({type:'error',text:r?.error||'Failed'});
+  };
+
+  const deactivateUser = async (user_id) => {
+    const r = await api.post('/api/admin', {action:'deactivate_user', user_id});
+    if(r?.success){ setMsg({type:'success',text:'User deactivated'}); load('users'); }
+    else setMsg({type:'error',text:r?.error||'Failed'});
+  };
+
+  // Roles a user already holds, mapped name → role id (so chips can be removed)
+  const roleNameToId = Object.fromEntries(roles.map(r=>[r.name, r.id]));
+
+  const openTemplateEditor = (t) => setTplEdit({
+    doc_type: t.doc_type, title: t.title, footer_note: t.footer_note||'', terms_text: t.terms_text||'',
+    sign_labels: (t.sign_labels||[]).join(', '),
+  });
+
+  const saveTemplate = async () => {
+    if(!tplEdit) return;
+    const r = await api.post('/api/document-templates', {
+      action:'save_template', doc_type: tplEdit.doc_type, title: tplEdit.title,
+      footer_note: tplEdit.footer_note, terms_text: tplEdit.terms_text,
+      sign_labels: tplEdit.sign_labels.split(',').map(s=>s.trim()).filter(Boolean),
+    });
+    if(r?.success){ setMsg({type:'success',text:'Template saved — every new PDF of this type will use it immediately'}); setTplEdit(null); load('doc_templates'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const resetTemplate = async (doc_type) => {
+    const r = await api.post('/api/document-templates', { action:'reset_template', doc_type });
+    if(r?.success){ setMsg({type:'success',text:'Reverted to default'}); load('doc_templates'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
   const load = async (section) => {
     if(section==='companies'){ loadCompanies(); return; }
+    if(section==='doc_templates'){
+      setLoading(true);
+      const r = await api.get('/api/document-templates');
+      if(r?.success) setDocTemplates(r.data);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     const r = await api.get(`/api/admin?section=${section}`);
     if(r?.success){
@@ -2988,7 +3515,11 @@ function AdminModule({ api, user }) {
       if(section==='integrations')setIntegrations(r.data);
       if(section==='roles')setRoles(r.data);
       if(section==='permissions')setPermissions(r.data);
-      if(section==='users')setUsers(r.data);
+      if(section==='users'){
+        setUsers(r.data);
+        const e = await api.get('/api/hr?section=employees'); if(e?.success) setEmployees(e.data);
+        const rl = await api.get('/api/admin?section=roles'); if(rl?.success) setRoles(rl.data);
+      }
       if(section==='departments')setDeptData(r.data);
       if(section==='settings')setSettings(r.data);
     }
@@ -3064,7 +3595,7 @@ function AdminModule({ api, user }) {
       {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
       <Alert type="info">Modular Architecture: toggle modules on/off below to control what's available in this deployment. Core modules (Dashboard, Admin, Settings) cannot be disabled.</Alert>
 
-      <Tabs tabs={[{id:'modules',label:'Modules'},{id:'integrations',label:'Integrations'},{id:'companies',label:'Companies'},{id:'roles',label:'Roles & Permissions'},{id:'users',label:'Users'},{id:'departments',label:'Departments & Branches'},{id:'settings',label:'System Settings'}]} active={tab} setActive={setTab}/>
+      <Tabs tabs={[{id:'modules',label:'Modules'},{id:'integrations',label:'Integrations'},{id:'companies',label:'Companies'},{id:'roles',label:'Roles & Permissions'},{id:'users',label:'Users'},{id:'departments',label:'Departments & Branches'},{id:'doc_templates',label:'Document Templates'},{id:'settings',label:'System Settings'}]} active={tab} setActive={setTab}/>
 
       {loading?<Loading/>:tab==='modules'?(
         <Card style={{padding:0,overflow:'hidden'}}>
@@ -3117,17 +3648,59 @@ function AdminModule({ api, user }) {
             ])}
           />
         </Card>
-      ):tab==='users'?(
+      ):tab==='users'?(<>
+        <SectionHeader title="Users" sub="Create accounts and assign roles" action={<Btn onClick={()=>setModal('new_user')}>+ New User</Btn>}/>
         <Card style={{padding:0,overflow:'hidden'}}>
-          <DataTable headers={['Name','Email','Department','Roles','Status']}
+          <DataTable headers={['Name','Email','Department','Roles','Assign Role','Status','']}
             rows={users.map(u=>[
               u.name||'—', <span style={{fontSize:11}}>{u.email}</span>, u.department||'—',
-              <span style={{fontSize:11}}>{u.roles||u.legacy_role}</span>,
+              <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                {(u.roles?u.roles.split(','):[]).map(rn=>(
+                  <Badge key={rn} variant="navy">
+                    {rn} {roleNameToId[rn]&&<span style={{cursor:'pointer',marginLeft:4}} onClick={()=>removeRole(u.id,roleNameToId[rn])}>✕</span>}
+                  </Badge>
+                ))}
+                {!u.roles&&<span style={{fontSize:11,color:T.mgrey}}>{u.legacy_role}</span>}
+              </div>,
+              <div style={{display:'flex',gap:4}}>
+                <select value={roleAssign[u.id]||''} onChange={e=>setRoleAssign({...roleAssign,[u.id]:e.target.value})} style={{fontSize:11,padding:'4px 6px',border:`1px solid ${T.lgrey}`,borderRadius:5}}>
+                  <option value="">Select role…</option>
+                  {roles.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}
+                </select>
+                <Btn size="sm" variant="ghost" onClick={()=>assignRole(u.id)} disabled={!roleAssign[u.id]}>Assign</Btn>
+              </div>,
               <Badge variant={u.is_active?'green':'red'}>{u.is_active?'Active':'Inactive'}</Badge>,
+              u.is_active?<Btn size="sm" variant="ghost" onClick={()=>deactivateUser(u.id)}>Deactivate</Btn>:'—',
             ])}
           />
         </Card>
-      ):tab==='departments'?(<>
+        {modal==='new_user'&&(
+          <Modal title="New User Account" onClose={()=>setModal(null)} width={560}>
+            <Select label="Employee" value={userForm.employee_id} onChange={v=>{const emp=employees.find(e=>e.id===v);setUserForm({...userForm,employee_id:v,email:userForm.email||emp?.email||''});}} required
+              options={[{value:'',label:'Select employee…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name} — ${e.department}`}))]}/>
+            <Input label="Login Email" value={userForm.email} onChange={v=>setUserForm({...userForm,email:v})} type="email" required/>
+            <Input label="Temporary Password" value={userForm.password} onChange={v=>setUserForm({...userForm,password:v})} type="password" required placeholder="User should change on first login"/>
+            <Select label="Primary Role (legacy)" value={userForm.role} onChange={v=>setUserForm({...userForm,role:v})}
+              options={['staff','sales_rep','technician','qm','store_clerk','store_manager','procurement_officer','fleet_manager','hr_manager','project_manager','commercial_manager','cfo','admin','md'].map(r=>({value:r,label:r}))}/>
+            <label style={{display:'block',fontSize:11,fontWeight:600,color:T.dgrey,margin:'10px 0 6px'}}>Additional Roles (RBAC)</label>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+              {roles.map(r=>{
+                const checked = userForm.role_codes.includes(r.code);
+                return (
+                  <label key={r.id} style={{display:'flex',alignItems:'center',gap:4,fontSize:11,background:checked?T.offwt:'transparent',border:`1px solid ${T.lgrey}`,borderRadius:6,padding:'4px 8px',cursor:'pointer'}}>
+                    <input type="checkbox" checked={checked} onChange={()=>{
+                      const codes = checked ? userForm.role_codes.filter(c=>c!==r.code) : [...userForm.role_codes, r.code];
+                      setUserForm({...userForm, role_codes:codes});
+                    }}/>
+                    {r.name}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createUser} disabled={!userForm.employee_id||!userForm.email||!userForm.password}>Create User</Btn></div>
+          </Modal>
+        )}
+      </>):tab==='departments'?(<>
         <SectionHeader title="Branches"/>
         <Card style={{padding:0,overflow:'hidden',marginBottom:16}}>
           <DataTable headers={['Code','Name','City','Manager']}
@@ -3138,6 +3711,37 @@ function AdminModule({ api, user }) {
           <DataTable headers={['Code','Name','Branch','Head']}
             rows={deptData.departments.map(d=>[d.code,d.name,d.branch_name||'—',d.head_name||'—'])}/>
         </Card>
+      </>):tab==='doc_templates'?(<>
+        <Alert type="info">These control the 19 auto-generated business document PDFs (quotes, debit/credit notes, purchase orders, leave forms, NDAs, etc). Edit a document's title, signatory labels, terms &amp; conditions text, or footer note here — every PDF of that type generated anywhere in the system (Finance, Procurement, Stores, CRM, HR…) picks up the change immediately, with no code changes needed.</Alert>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Document Type','Title','Signatories','Status','']}
+            rows={docTemplates.map(t=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{t.doc_type}</span>,
+              <strong style={{fontSize:12}}>{t.title}</strong>,
+              <span style={{fontSize:11}}>{(t.sign_labels||[]).join(' · ')||'—'}</span>,
+              t.is_customised?<Badge variant="amber">Customised</Badge>:<Badge variant="default">Default</Badge>,
+              <div style={{display:'flex',gap:4}}>
+                <Btn size="sm" onClick={()=>openTemplateEditor(t)}>Edit</Btn>
+                {t.is_customised&&<Btn size="sm" variant="ghost" onClick={()=>resetTemplate(t.doc_type)}>Reset</Btn>}
+              </div>,
+            ])}
+          />
+        </Card>
+        {tplEdit&&(
+          <Modal title={`Edit Template — ${tplEdit.doc_type}`} onClose={()=>setTplEdit(null)} width={620}>
+            <Input label="Document Title" value={tplEdit.title} onChange={v=>setTplEdit({...tplEdit,title:v})} placeholder="Printed at the top of the PDF"/>
+            <Input label="Signatory Labels (comma-separated)" value={tplEdit.sign_labels} onChange={v=>setTplEdit({...tplEdit,sign_labels:v})} placeholder="e.g. Prepared by, Approved by Finance"/>
+            <label style={{display:'block',fontSize:12,fontWeight:600,color:T.dgrey,marginBottom:5}}>Terms &amp; Conditions</label>
+            <textarea value={tplEdit.terms_text} onChange={e=>setTplEdit({...tplEdit,terms_text:e.target.value})} rows={4}
+              placeholder="Optional — printed near the bottom of the document, above the signature lines"
+              style={{width:'100%',padding:'9px 12px',border:`1.5px solid ${T.lgrey}`,borderRadius:7,fontSize:13,marginBottom:14,fontFamily:'inherit',resize:'vertical'}}/>
+            <Input label="Footer Note" value={tplEdit.footer_note} onChange={v=>setTplEdit({...tplEdit,footer_note:v})} placeholder="Replaces the default 'This document is generated by QSL ERP...' footer line"/>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+              <Btn variant="ghost" onClick={()=>setTplEdit(null)}>Cancel</Btn>
+              <Btn onClick={saveTemplate}>Save Template</Btn>
+            </div>
+          </Modal>
+        )}
       </>):tab==='settings'?(<>
         <Alert type="info">Adjust system behaviour without editing code. Changes apply immediately — VAT rate, approval chain, imprest window, alert timings, MSP margins, company details and theme are all read live by the relevant modules.</Alert>
         {SETTINGS_REGISTRY.map(group=>{
@@ -3278,16 +3882,39 @@ function CRMModule({ api }) {
   const [leadForm,setLeadForm]=useState({company:'',contact_name:'',service:'Calibration Services',estimated_value:'',source:'Direct'});
   const [employees,setEmployees]=useState([]);
   const [msg,setMsg]=useState(null);
+  // COM-QUOTE-001: quote creation + send-to-client, available here so Sales
+  // Reps and Technicians (who don't have Finance access) can still quote
+  // and send a real PDF straight from Commercial.
+  const [quotes,setQuotes]=useState([]);
+  const [quoteForm,setQuoteForm]=useState({client_id:'',valid_until:'',lines:[{description:'',quantity:1,unit_price:''}]});
+  const [sendingQuote,setSendingQuote]=useState(null);
 
   const load=async(t=tab)=>{
     setLoading(true);
     if(t==='clients'){const r=await api.get('/api/crm?section=clients');if(r?.success)setClients(r.data);}
     if(t==='leads'){const r=await api.get('/api/crm?section=leads');if(r?.success)setLeads(r.data);}
+    if(t==='quotes'){const r=await api.get('/api/finance?section=quotes');if(r?.success)setQuotes(r.data);if(clients.length===0){const c=await api.get('/api/crm?section=clients');if(c?.success)setClients(c.data);}}
     setLoading(false);
   };
   useEffect(()=>{load();api.get('/api/hr?section=employees').then(r=>{if(r?.success)setEmployees(r.data);});},[tab]);
 
   const loadDetail=async(id)=>{setSelected(id);const r=await api.get(`/api/crm?section=client&id=${id}`);if(r?.success)setDetail(r.data);};
+
+  const createQuote = async () => {
+    const lines = quoteForm.lines.filter(l=>l.description&&l.unit_price).map(l=>({...l,quantity:parseFloat(l.quantity)||1,unit_price:parseFloat(l.unit_price)}));
+    if(!quoteForm.client_id||!lines.length) return;
+    const r = await api.post('/api/finance',{action:'create_quote',client_id:quoteForm.client_id,valid_until:quoteForm.valid_until,lines});
+    if(r?.success){ setMsg({type:'success',text:`Quote ${r.data.quote_no} created`}); setModal(null); setQuoteForm({client_id:'',valid_until:'',lines:[{description:'',quantity:1,unit_price:''}]}); load('quotes'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const sendQuoteToClient = async (quote_id) => {
+    setSendingQuote(quote_id);
+    const r = await api.post('/api/finance',{action:'send_quote',quote_id});
+    setSendingQuote(null);
+    if(r?.success){ setMsg({type:'success',text:r.data.mock?`Quote emailed to ${r.data.to} (dev mode — no live SMTP configured, logged to server console)`:`Quote emailed to ${r.data.to}`}); load('quotes'); }
+    else setMsg({type:'error',text:r?.error});
+  };
 
   const initiateTransfer=async()=>{
     if(!txForm.to_owner_id||!txForm.reason)return;
@@ -3365,7 +3992,7 @@ function CRMModule({ api }) {
 
   return(<div>
     {msg&&<Alert type={msg.type}>{msg.text} {msg.transferId&&<DocPdfButton api={api} label="Download Transfer Doc" url={`/api/crm?section=transfer_pdf&id=${msg.transferId}`}/>}</Alert>}
-    <Tabs tabs={[{id:'clients',label:'Client Register'},{id:'leads',label:'Leads & Pipeline'},{id:'payments',label:'Payment Alerts'}]} active={tab} setActive={t=>setTab(t)}/>
+    <Tabs tabs={[{id:'clients',label:'Client Register'},{id:'leads',label:'Leads & Pipeline'},{id:'quotes',label:'Quotes'},{id:'payments',label:'Payment Alerts'}]} active={tab} setActive={t=>setTab(t)}/>
     {loading&&<Loading/>}
     {!loading&&tab==='clients'&&(<>
       <Alert type="info">CRM-055: Client ownership transfer requires CFO + MD digital signatures.</Alert>
@@ -3418,6 +4045,39 @@ function CRMModule({ api }) {
         />
       </Card>
     </>)}
+    {!loading&&tab==='quotes'&&(<>
+      <SectionHeader title="Quotations" sub="Create a quote and email it straight to the client as a real PDF" action={<Btn onClick={()=>setModal('quote')}>+ New Quote</Btn>}/>
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Quote No','Client','Total','Status','Valid Until','']} empty="No quotes yet — create one above."
+          rows={quotes.map(q=>[
+            <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{q.quote_no}</span>,
+            q.client_name,
+            <strong>{fmt.kes(q.total)}</strong>,
+            <Badge variant={q.status==='accepted'?'green':q.status==='sent'?'blue':'amber'}>{q.status}</Badge>,
+            q.valid_until?fmt.date(q.valid_until):'—',
+            <div style={{display:'flex',gap:4}}>
+              <DocPdfButton api={api} url={`/api/finance?section=quote_pdf&id=${q.id}`}/>
+              <Btn size="sm" onClick={()=>sendQuoteToClient(q.id)} disabled={sendingQuote===q.id}>{sendingQuote===q.id?'Sending…':'✉ Send to Client'}</Btn>
+            </div>,
+          ])}
+        />
+      </Card>
+      {modal==='quote'&&(
+        <Modal title="New Quotation" onClose={()=>setModal(null)} width={560}>
+          <Select label="Client" value={quoteForm.client_id} onChange={v=>setQuoteForm({...quoteForm,client_id:v})} required options={[{value:'',label:'Select…'},...clients.map(c=>({value:c.id,label:`${c.name}${c.email?'':' (no email on file)'}`}))]}/>
+          <Input label="Valid Until" value={quoteForm.valid_until} onChange={v=>setQuoteForm({...quoteForm,valid_until:v})} type="date"/>
+          {quoteForm.lines.map((l,idx)=>(
+            <div key={idx} style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:8,marginBottom:6}}>
+              <Input label="Description" value={l.description} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,description:v};setQuoteForm({...quoteForm,lines:ls});}}/>
+              <Input label="Qty" value={l.quantity} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,quantity:v};setQuoteForm({...quoteForm,lines:ls});}} type="number"/>
+              <Input label="Unit Price" value={l.unit_price} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,unit_price:v};setQuoteForm({...quoteForm,lines:ls});}} type="number"/>
+            </div>
+          ))}
+          <Btn size="sm" variant="ghost" onClick={()=>setQuoteForm({...quoteForm,lines:[...quoteForm.lines,{description:'',quantity:1,unit_price:''}]})}>+ Add Line</Btn>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createQuote} disabled={!quoteForm.client_id}>Create Quote</Btn></div>
+        </Modal>
+      )}
+    </>)}
     {!loading&&tab==='payments'&&(
       <Card style={{padding:0,overflow:'hidden'}}>
         <DataTable headers={['Client','Outstanding','Status','Action']}
@@ -3445,6 +4105,140 @@ function CRMModule({ api }) {
 
 // ── STORES MODULE ─────────────────────────────────────────────────────────────
 // ── STORE MANAGEMENT MODULE (point 1) ─────────────────────────────────────────
+function ShopModule({ api, user }) {
+  const [tab,setTab]=useState('orders');
+  const [orders,setOrders]=useState([]);
+  const [listings,setListings]=useState([]);
+  const [orderDetail,setOrderDetail]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [msg,setMsg]=useState(null);
+  const [editModal,setEditModal]=useState(null); // item being edited for shop_description/image_url
+  const [editForm,setEditForm]=useState({});
+
+  const load = async (section) => {
+    setLoading(true);
+    const r = await api.get(`/api/shop?section=${section}`);
+    if(r?.success){
+      if(section==='orders')setOrders(r.data);
+      if(section==='listings')setListings(r.data);
+    } else if (r?.error) {
+      setMsg({type:'error',text:r.error});
+    }
+    setLoading(false);
+  };
+
+  useEffect(()=>{ load(tab); }, [tab]);
+
+  const act = async (action, payload, successText) => {
+    const r = await api.post('/api/shop', {action, ...payload});
+    if(r?.success){ setMsg({type:'success',text:successText||'Done.'}); load(tab); if(orderDetail) viewOrder(orderDetail.order.id); }
+    else setMsg({type:'error',text:r?.error||'Action failed'});
+  };
+
+  const viewOrder = async (id) => {
+    const r = await api.get(`/api/shop?section=order_detail&id=${id}`);
+    if(r?.success) setOrderDetail(r.data);
+  };
+
+  const statusBadge = (status) => {
+    const map = { pending_payment:'amber', paid:'blue', fulfilled:'green', cancelled:'red' };
+    const labels = { pending_payment:'Pending Payment', paid:'Paid', fulfilled:'Fulfilled', cancelled:'Cancelled' };
+    return <Badge variant={map[status]||'default'}>{labels[status]||status}</Badge>;
+  };
+
+  const pendingCount = orders.filter(o=>o.status==='pending_payment').length;
+
+  return (
+    <div>
+      {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
+      <Alert type="info">Orders placed on the public website (qalibrated.co.ke/shop) land here automatically — stock is deducted and a draft invoice is created the moment an order is placed, ready for payment to be collected and the order fulfilled.</Alert>
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
+        <Stat label="Total Orders" value={orders.length} icon="🛒"/>
+        <Stat label="Awaiting Payment" value={pendingCount} icon="⏳" variant={pendingCount?'red':'green'}/>
+        <Stat label="Listed Products" value={listings.filter(l=>l.is_publicly_sellable).length} icon="🏷️"/>
+        <Stat label="Total Catalog Items" value={listings.length} icon="📦"/>
+      </div>
+
+      <Tabs tabs={[{id:'orders',label:`Orders (${orders.length})`},{id:'listings',label:'Shop Listings'}]} active={tab} setActive={setTab}/>
+
+      {tab==='orders'&&(loading?<Loading/>:(
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Order No','Customer','Items','Total (Kshs)','Status','Placed','Action']}
+            rows={orders.map(o=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{o.order_no}</span>,
+              <div><strong style={{fontSize:12}}>{o.customer_name}</strong>{o.company_name?<div style={{fontSize:11,color:T.mgrey}}>{o.company_name}</div>:null}</div>,
+              o.email,
+              <strong>{Number(o.total).toLocaleString('en-KE')}</strong>,
+              statusBadge(o.status),
+              new Date(o.created_at).toLocaleDateString(),
+              <Btn size="sm" variant="ghost" onClick={()=>viewOrder(o.id)}>View</Btn>,
+            ])}
+          />
+        </Card>
+      ))}
+
+      {tab==='listings'&&(loading?<Loading/>:(
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Code','Item','Category','Stock','Price (Kshs)','Source','Listed?','Edit']}
+            rows={listings.map(i=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{i.code}</span>,
+              <strong style={{fontSize:12}}>{i.name}</strong>,
+              <Badge variant="navy">{i.category_name||i.category||'—'}</Badge>,
+              i.stock_available,
+              <strong>{Number(i.computed_price).toLocaleString('en-KE')}</strong>,
+              <Badge variant={i.price_source==='msp'?'blue':'default'}>{i.price_source==='msp'?'Set price':'Cost + margin'}</Badge>,
+              <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                <input type="checkbox" checked={!!i.is_publicly_sellable}
+                  onChange={e=>act('toggle_listing',{item_id:i.id, enabled:e.target.checked}, e.target.checked?'Listed on shop.':'Removed from shop.')}/>
+                {i.is_publicly_sellable?<Badge variant="green">Listed</Badge>:<Badge>Unlisted</Badge>}
+              </label>,
+              <Btn size="sm" variant="ghost" onClick={()=>{setEditForm({shop_description:i.shop_description||'',image_url:i.image_url||''});setEditModal(i);}}>Edit</Btn>,
+            ])}
+          />
+        </Card>
+      ))}
+
+      {orderDetail&&(
+        <Modal title={`Order ${orderDetail.order.order_no}`} onClose={()=>setOrderDetail(null)}>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:13,marginBottom:4}}><strong>{orderDetail.order.customer_name}</strong>{orderDetail.order.company_name?` — ${orderDetail.order.company_name}`:''}</div>
+            <div style={{fontSize:12,color:T.mgrey}}>{orderDetail.order.email} · {orderDetail.order.phone}</div>
+            <div style={{fontSize:12,color:T.mgrey,marginTop:4}}>📍 {orderDetail.order.delivery_address}</div>
+            {orderDetail.order.notes&&<div style={{fontSize:12,color:T.mgrey,marginTop:4,whiteSpace:'pre-wrap'}}>{orderDetail.order.notes}</div>}
+            <div style={{marginTop:8}}>{statusBadge(orderDetail.order.status)} {orderDetail.invoice&&<Badge variant="purple">Invoice {orderDetail.invoice.invoice_no}</Badge>}</div>
+          </div>
+          <DataTable headers={['Item','Qty','Unit Price','Line Total']}
+            rows={orderDetail.lines.map(l=>[l.item_name, l.quantity, Number(l.unit_price).toLocaleString('en-KE'), Number(l.line_total).toLocaleString('en-KE')])}
+          />
+          <div style={{textAlign:'right',marginTop:10,fontSize:13}}>
+            <div>Subtotal: Kshs {Number(orderDetail.order.subtotal).toLocaleString('en-KE')}</div>
+            <div>VAT: Kshs {Number(orderDetail.order.vat_amount).toLocaleString('en-KE')}</div>
+            <div style={{fontWeight:700,fontSize:15,marginTop:4}}>Total: Kshs {Number(orderDetail.order.total).toLocaleString('en-KE')}</div>
+          </div>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16,flexWrap:'wrap'}}>
+            {orderDetail.order.status==='pending_payment'&&<Btn size="sm" onClick={()=>act('mark_paid',{order_id:orderDetail.order.id},'Marked as paid.')}>Mark Paid</Btn>}
+            {orderDetail.order.status==='paid'&&<Btn size="sm" onClick={()=>act('mark_fulfilled',{order_id:orderDetail.order.id},'Marked as fulfilled.')}>Mark Fulfilled</Btn>}
+            {['pending_payment','paid'].includes(orderDetail.order.status)&&
+              <Btn size="sm" variant="ghost" onClick={()=>{ if(confirm('Cancel this order and restock its items?')) act('cancel_order',{order_id:orderDetail.order.id},'Order cancelled and restocked.'); }}>Cancel & Restock</Btn>}
+          </div>
+        </Modal>
+      )}
+
+      {editModal&&(
+        <Modal title={`Edit Shop Listing — ${editModal.name}`} onClose={()=>setEditModal(null)}>
+          <Input label="Shop Description" value={editForm.shop_description} onChange={v=>setEditForm({...editForm,shop_description:v})}/>
+          <Input label="Image URL" value={editForm.image_url} onChange={v=>setEditForm({...editForm,image_url:v})}/>
+          <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+            <Btn variant="ghost" onClick={()=>setEditModal(null)}>Cancel</Btn>
+            <Btn onClick={async()=>{ await act('update_listing',{item_id:editModal.id,...editForm},'Listing updated.'); setEditModal(null); }}>Save</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function StoresModule({ api, user }) {
   const [tab,setTab]=useState('items');
   const [items,setItems]=useState([]);
@@ -3879,69 +4673,153 @@ function FleetModule({ api }) {
 function HSE({ api }) {
   const [tab,setTab]=useState('incidents');
   const [modal,setModal]=useState(null);
-  const [form,setForm]=useState({type:'Near Miss',site:'',description:'',severity:'Low'});
+  const [form,setForm]=useState({type:'Near Miss',site:'',description:'',severity:'Low',project_id:''});
   const [msg,setMsg]=useState(null);
-  const [incidents,setIncidents]=useState([
-    {id:'HSE001',date:'2026-05-12',type:'Near Miss',site:'Mombasa Water Treatment',description:'Worker nearly slipped on wet platform',severity:'Low',status:'Closed',capa:'Non-slip matting installed'},
-    {id:'HSE002',date:'2026-06-03',type:'First Aid',site:'Nairobi HQ Workshop',description:'Minor cut on right hand — inadequate gloves',severity:'Low',status:'CAPA Pending',capa:'Glove policy review required'},
-    {id:'HSE003',date:'2026-06-10',type:'Observation',site:'KPLC Substation',description:'Positive: 100% PPE compliance on site',severity:'None',status:'Closed',capa:'—'},
-  ]);
-  const report=()=>{
-    if(!form.site||!form.description)return;
-    setIncidents([{id:`HSE${Date.now().toString().slice(-3)}`,...form,date:new Date().toISOString().split('T')[0],status:'Open',capa:'Under Investigation'},...incidents]);
-    setMsg({type:'success',text:'Incident reported. Supervisor notified. CAPA required within 48 hours.'});
-    setModal(null);
+  const [loading,setLoading]=useState(false);
+  const [incidents,setIncidents]=useState([]);
+  const [rams,setRams]=useState([]);
+  const [ppe,setPpe]=useState([]);
+  const [projects,setProjects]=useState([]);
+  const [ramsFile,setRamsFile]=useState({project_id:'',file_name:'',file_data:''});
+
+  const load = async (t=tab) => {
+    setLoading(true);
+    if(t==='incidents'){ const r=await api.get('/api/hse?section=incidents'); if(r?.success)setIncidents(r.data); }
+    if(t==='rams'){ const r=await api.get('/api/hse?section=rams'); if(r?.success)setRams(r.data); }
+    if(t==='ppe'){ const r=await api.get('/api/hse?section=ppe'); if(r?.success)setPpe(r.data); }
+    setLoading(false);
   };
+  useEffect(()=>{ load(); if(projects.length===0){ api.get('/api/projects?section=list').then(r=>{if(r?.success)setProjects(r.data);}); } },[tab]);
+
+  const report = async () => {
+    if(!form.site||!form.description) return;
+    const r = await api.post('/api/hse',{action:'report_incident',...form});
+    if(r?.success){
+      setMsg({type:'success',text:`Incident ${r.data.ref_no} reported. Supervisor notified. CAPA required within 48 hours.`});
+      setModal(null); setForm({type:'Near Miss',site:'',description:'',severity:'Low',project_id:''}); load('incidents');
+    } else setMsg({type:'error',text:r?.error});
+  };
+
+  const updateStatus = async (incident_id, status, capa) => {
+    const r = await api.post('/api/hse',{action:'update_incident_status',incident_id,status,capa});
+    if(r?.success) load('incidents'); else setMsg({type:'error',text:r?.error});
+  };
+
+  const onRamsFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => setRamsFile({...ramsFile,file_name:file.name,file_data:reader.result});
+    reader.readAsDataURL(file);
+  };
+  const fileRams = async () => {
+    if(!ramsFile.project_id||!ramsFile.file_data) return;
+    const r = await api.post('/api/hse',{action:'file_rams',...ramsFile});
+    if(r?.success){ setMsg({type:'success',text:'RAMS filed.'}); setModal(null); setRamsFile({project_id:'',file_name:'',file_data:''}); load('rams'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+  const approveRams = async (rams_id) => {
+    const r = await api.post('/api/hse',{action:'approve_rams',rams_id});
+    if(r?.success){ setMsg({type:'success',text:'RAMS approved.'}); load('rams'); } else setMsg({type:'error',text:r?.error});
+  };
+
+  const severityVariant = s => ({None:'green',Low:'amber',Medium:'amber',High:'red',Critical:'red'}[s]||'default');
+
   return(<div>
     {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
     <Tabs tabs={[{id:'incidents',label:'Incident Register'},{id:'rams',label:'RAMS Status'},{id:'ppe',label:'PPE Tracker'}]} active={tab} setActive={setTab}/>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
       <Stat label="Incidents YTD" value={incidents.length} icon="🦺"/>
-      <Stat label="Lost Time Injuries" value={0} sub="Zero LTI" icon="✅" variant="green"/>
-      <Stat label="Open CAPAs" value={incidents.filter(i=>i.status!=='Closed').length} icon="🔧" variant="amber"/>
+      <Stat label="Lost Time Injuries" value={incidents.filter(i=>i.type==='Lost Time Injury').length} sub={incidents.filter(i=>i.type==='Lost Time Injury').length===0?'Zero LTI':undefined} icon={incidents.filter(i=>i.type==='Lost Time Injury').length===0?'✅':'⚠️'} variant={incidents.filter(i=>i.type==='Lost Time Injury').length===0?'green':'red'}/>
+      <Stat label="Open CAPAs" value={incidents.filter(i=>i.status!=='closed').length} icon="🔧" variant="amber"/>
       <Stat label="Near Misses" value={incidents.filter(i=>i.type==='Near Miss').length} icon="⚠️" variant="amber"/>
     </div>
-    <Alert type="warning">HSE-002: RAMS upload mandatory before site mobilisation. ERP blocks project start without approved RAMS.</Alert>
-    {tab==='incidents'&&(<>
+    <Alert type="warning">HSE-002: RAMS upload mandatory before site mobilisation.</Alert>
+
+    {loading&&<Loading/>}
+
+    {!loading&&tab==='incidents'&&(<>
       <SectionHeader title="Incident Register" action={<Btn onClick={()=>setModal('inc')}>+ Report Incident</Btn>}/>
+      {incidents.length===0&&<Card><p style={{fontSize:13,color:T.mgrey,textAlign:'center'}}>No incidents reported.</p></Card>}
       {incidents.map(h=>(
-        <Card key={h.id} style={{marginBottom:10,background:h.type==='Near Miss'?T.amberL:h.type==='First Aid'?T.redL:T.greenL}}>
-          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-            <div style={{display:'flex',gap:8}}><Badge variant={h.type==='Near Miss'?'amber':h.type==='First Aid'?'red':'green'}>{h.type}</Badge><span style={{fontSize:11,color:T.mgrey}}>{fmt.date(h.date)} · {h.site}</span></div>
-            <Badge variant={h.status==='Closed'?'green':'amber'}>{h.status}</Badge>
+        <Card key={h.id} style={{marginBottom:10,background:h.type==='Near Miss'?T.amberL:h.type==='First Aid'||h.type==='Lost Time Injury'?T.redL:T.greenL}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,flexWrap:'wrap',gap:6}}>
+            <div style={{display:'flex',gap:8,alignItems:'center'}}>
+              <span style={{fontFamily:'monospace',fontSize:10,color:T.mgrey}}>{h.ref_no}</span>
+              <Badge variant={severityVariant(h.type==='Near Miss'?'Low':h.severity)}>{h.type}</Badge>
+              <span style={{fontSize:11,color:T.mgrey}}>{fmt.date(h.created_at)} · {h.site}{h.project_name?` · ${h.project_name}`:''}</span>
+            </div>
+            <Badge variant={h.status==='closed'?'green':h.status==='capa_pending'?'amber':'red'}>{h.status.replace('_',' ')}</Badge>
           </div>
           <div style={{fontSize:12}}>{h.description}</div>
-          {h.capa&&h.capa!=='—'&&<div style={{fontSize:11,color:T.mgrey,marginTop:4}}>CAPA: {h.capa}</div>}
+          <div style={{fontSize:11,color:T.mgrey,marginTop:4}}>Reported by {h.reported_by_name||'—'}{h.capa?` · CAPA: ${h.capa}`:''}</div>
+          {h.status!=='closed'&&(
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              {h.status==='open'&&<Btn size="sm" variant="ghost" onClick={()=>updateStatus(h.id,'capa_pending',h.capa)}>Mark CAPA Pending</Btn>}
+              <Btn size="sm" onClick={()=>{const capa=prompt('Corrective/Preventive action taken:'); if(capa) updateStatus(h.id,'closed',capa);}}>Close with CAPA</Btn>
+            </div>
+          )}
         </Card>
       ))}
     </>)}
-    {tab==='rams'&&(
+
+    {!loading&&tab==='rams'&&(
       <Card style={{padding:0,overflow:'hidden'}}>
-        <DataTable headers={['Project','RAMS Status','Date Filed','Action']}
-          rows={[['Mombasa Water Treatment','Filed','2026-04-01'],['Nairobi Hospital Medical Gas','Filed','2026-05-15'],['KPLC Substation','Filed','2026-03-10'],['SGR Weighbridge','Filed','2026-02-20'],['Kisumu Port Flow Meter','Not Filed','—']].map(([p,s,d])=>[<strong style={{fontSize:12}}>{p}</strong>,<Badge variant={s==='Filed'?'green':'red'}>{s==='Filed'?'✅ Filed':'🛑 Missing'}</Badge>,d!=='—'?fmt.date(d):<span style={{color:T.red}}>NOT UPLOADED</span>,s!=='Filed'?<Btn size="sm" variant="danger">Upload Now</Btn>:<Btn size="sm" variant="ghost">View</Btn>])}
+        <DataTable headers={['Project','RAMS Status','Date Filed','Action']} empty="No active projects."
+          rows={rams.map(r=>[
+            <strong style={{fontSize:12}}>{r.project_name}</strong>,
+            <Badge variant={r.rams_status==='approved'?'green':r.rams_status==='filed'?'amber':'red'}>
+              {r.rams_status==='approved'?'✅ Approved':r.rams_status==='filed'?'⏳ Filed — Pending Approval':'🛑 Missing'}
+            </Badge>,
+            r.filed_date?fmt.date(r.filed_date):<span style={{color:T.red}}>NOT UPLOADED</span>,
+            r.rams_status==='not_filed'
+              ? <Btn size="sm" variant="danger" onClick={()=>{setRamsFile({project_id:r.project_id,file_name:'',file_data:''});setModal('rams');}}>Upload Now</Btn>
+              : r.rams_status==='filed'
+                ? <Btn size="sm" onClick={()=>approveRams(r.rams_id)}>Approve</Btn>
+                : <a href={r.file_url} target="_blank" rel="noopener noreferrer"><Btn size="sm" variant="ghost">View</Btn></a>,
+          ])}
         />
       </Card>
     )}
-    {tab==='ppe'&&(
+
+    {!loading&&tab==='ppe'&&(
       <Card style={{padding:0,overflow:'hidden'}}>
-        <DataTable headers={['PPE Item','Qty','Status']}
-          rows={[['Safety Helmets',27,true],['Safety Harnesses',18,true],['Steel-toe Boots',24,true],['Hi-Vis Vests',30,true],['Safety Glasses',25,true],['Cut-Resistant Gloves',12,false],['Ear Protection',15,true]].map(([item,qty,ok])=>[<strong style={{fontSize:12}}>{item}</strong>,<span style={{fontWeight:700,color:ok?T.green:T.red}}>{qty}</span>,ok?<Badge variant="green">Adequate</Badge>:<Badge variant="red">Low — Reorder</Badge>])}
+        <Alert type="info">Live from Stores inventory (PPE & Safety Equipment category) — issue more via Stores → Receive Stock if anything is low.</Alert>
+        <DataTable headers={['PPE Item','Qty in Stock','Status']} empty="No PPE items in the catalog yet — add them in Stores."
+          rows={ppe.map(p=>[
+            <strong style={{fontSize:12}}>{p.name}</strong>,
+            <span style={{fontWeight:700,color:p.quantity>p.reorder_level?T.green:T.red}}>{p.quantity}</span>,
+            p.quantity>p.reorder_level?<Badge variant="green">Adequate</Badge>:<Badge variant="red">Low — Reorder</Badge>,
+          ])}
         />
       </Card>
     )}
+
     {modal==='inc'&&(
-      <Modal title="Report Incident — HSE-001" onClose={()=>setModal(null)}>
+      <Modal title="Report Incident" onClose={()=>setModal(null)}>
         <Alert type="warning">Report within 24 hours. CAPA required within 48 hours.</Alert>
         <Select label="Type" value={form.type} onChange={v=>setForm({...form,type:v})} options={['Near Miss','First Aid','Medical Treatment','Lost Time Injury','Positive Observation'].map(t=>({value:t,label:t}))}/>
         <Input label="Site / Location" value={form.site} onChange={v=>setForm({...form,site:v})} required/>
+        <Select label="Related Project (optional)" value={form.project_id} onChange={v=>setForm({...form,project_id:v})} options={[{value:'',label:'Not project-specific'},...projects.map(p=>({value:p.id,label:p.name}))]}/>
         <Select label="Severity" value={form.severity} onChange={v=>setForm({...form,severity:v})} options={['None','Low','Medium','High','Critical'].map(s=>({value:s,label:s}))}/>
         <Input label="Description" value={form.description} onChange={v=>setForm({...form,description:v})} required placeholder="What happened exactly?"/>
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={report} disabled={!form.site||!form.description}>Submit Report</Btn></div>
       </Modal>
     )}
+
+    {modal==='rams'&&(
+      <Modal title="File RAMS" onClose={()=>setModal(null)}>
+        <Select label="Project" value={ramsFile.project_id} onChange={v=>setRamsFile({...ramsFile,project_id:v})} required options={[{value:'',label:'Select…'},...projects.map(p=>({value:p.id,label:p.name}))]}/>
+        <input type="file" accept="application/pdf,image/*" onChange={e=>{const f=e.target.files?.[0]; if(f) onRamsFile(f);}} style={{fontSize:12,display:'block',margin:'10px 0'}}/>
+        {ramsFile.file_name&&<div style={{fontSize:12,color:T.green,marginBottom:8}}>✓ {ramsFile.file_name}</div>}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}>
+          <Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn>
+          <Btn onClick={fileRams} disabled={!ramsFile.project_id||!ramsFile.file_data}>File RAMS</Btn>
+        </div>
+      </Modal>
+    )}
   </div>);
 }
 
+// ── CALIBRATION MODULE ────────────────────────────────────────────────────────
 // ── SOP LIBRARY MODULE ──────────────────────────────────────────────────────
 // Departmental Standard Operating Procedures with full revision history.
 // Every department's SOPs are listed with their current revision number and
@@ -4012,7 +4890,7 @@ function SOPModule({ api, user }) {
             s.next_review_date?fmt.date(s.next_review_date):'—',
             <Badge variant={s.status==='active'?'green':s.status==='withdrawn'?'red':'amber'}>{s.status}</Badge>,
             <div style={{display:'flex',gap:4}}>
-              {s.file_url&&<Btn size="sm" variant="ghost" onClick={()=>window.open(s.file_url,'_blank')}>View</Btn>}
+              {s.file_url&&<Btn size="sm" variant="ghost" onClick={()=>window.open(`${s.file_url}?token=${authToken(api)}`,'_blank')}>View</Btn>}
               <Btn size="sm" variant="ghost" onClick={()=>viewHistory(s)}>History</Btn>
               <Btn size="sm" onClick={()=>{setRevForm({...revForm,sop_id:s.id});setModal('new_revision');}}>+ Revision</Btn>
             </div>,
@@ -4058,27 +4936,13 @@ function SOPModule({ api, user }) {
             v.uploaded_by_name||'—',
             fmt.date(v.uploaded_at),
             <span style={{fontSize:11}}>{v.change_notes||'—'}</span>,
-            v.file_url?<Btn size="sm" variant="ghost" onClick={()=>window.open(v.file_url,'_blank')}>View</Btn>:'—',
+            v.file_url?<Btn size="sm" variant="ghost" onClick={()=>window.open(`${v.file_url}?token=${authToken(api)}`,'_blank')}>View</Btn>:'—',
           ])}
         />
       </Modal>
     )}
   </div>);
 }
-
-// ── CALIBRATION MODULE ────────────────────────────────────────────────────────
-// ISO/IEC 17025 calibration method procedures (EURAMET / OIML) plus the
-// certificate output template. Served as static documents from public/templates.
-const CAL_DOCUMENTS = [
-  {name:'Calibration Certificate',                       kind:'template',  ref:'Output document — ISO/IEC 17025 methodology', file:'QSL_CalibrationCertificate_Template.html'},
-  {name:'NAWI — Non-Automatic Weighing Instruments',     kind:'procedure', ref:'EURAMET cg-18 / OIML R76',                    file:'QSL_CalProc_01_NAWI.html'},
-  {name:'Standard Masses — Class M2',                     kind:'procedure', ref:'OIML R111-1 / EURAMET cg-18',                 file:'QSL_CalProc_02_StandardMasses_M2.html'},
-  {name:'Temperature Indicating & Sensing Devices',      kind:'procedure', ref:'EURAMET cg-13',                              file:'QSL_CalProc_03_Temperature.html'},
-  {name:'Volumetric Glassware & Instruments',            kind:'procedure', ref:'EURAMET cg-19',                              file:'QSL_CalProc_04_Volume.html'},
-  {name:'Pressure Gauges / Manometers',                  kind:'procedure', ref:'EURAMET cg-17',                              file:'QSL_CalProc_05_Pressure.html'},
-  {name:'Liquid Flow Meters — Gravimetric',              kind:'procedure', ref:'EURAMET cg-19 principles',                   file:'QSL_CalProc_06_Flow.html'},
-  {name:'Humidity Indicators & Climatic Enclosures',     kind:'procedure', ref:'EURAMET cg-20',                              file:'QSL_CalProc_07_Humidity.html'},
-];
 
 function CalibrationModule({ api }) {
   const [tab,setTab]=useState('certificates');
@@ -4093,10 +4957,22 @@ function CalibrationModule({ api }) {
     nawi_repeatability:[{indication:''},{indication:''},{indication:''}],
     nawi_eccentricity:[{position:'Centre',indication:'',deviation:''},{position:'Front-Left',indication:'',deviation:''},{position:'Rear-Left',indication:'',deviation:''},{position:'Rear-Right',indication:'',deviation:''},{position:'Front-Right',indication:'',deviation:''}]});
   const [msg,setMsg]=useState(null);
+  // Field force — Service Request Forms & scheduled field jobs (technicians)
+  const [srfs,setSrfs]=useState([]);
+  const [jobs,setJobs]=useState([]);
+  const [procedures,setProcedures]=useState([]);
+  const [jobDetail,setJobDetail]=useState(null);
+  const [checklistTemplate,setChecklistTemplate]=useState({pre:[],post:[]});
+  const [checklistState,setChecklistState]=useState({});
+  const [photoCapture,setPhotoCapture]=useState({caption:'',file_name:'',file_data:'',lat:null,lng:null,gpsStatus:'idle'});
+  const [srfForm,setSrfForm]=useState({customer_name:'',contact_person:'',telephone:'',email:'',service_type:'Calibration',description:'',service_location:'lab',preferred_date:'',applicant_name:'',applicant_designation:''});
   const load=async(t=tab)=>{
     setLoading(true);
     if(t==='certificates'){const r=await api.get('/api/calibration?section=certificates');if(r?.success)setCerts(r.data);}
     if(t==='standards'){const r=await api.get('/api/calibration?section=reference_standards');if(r?.success)setStandards(r.data);}
+    if(t==='srf'){const r=await api.get('/api/calibration?section=service_requests');if(r?.success)setSrfs(r.data);}
+    if(t==='jobs'){const r=await api.get('/api/calibration?section=schedule');if(r?.success)setJobs(r.data);}
+    if(t==='procedures'){const r=await api.get('/api/calibration?section=procedures');if(r?.success)setProcedures(r.data);}
     setLoading(false);
   };
   useEffect(()=>{load();api.get('/api/crm?section=clients').then(r=>{if(r?.success)setClients(r.data);});api.get('/api/calibration?section=reference_standards').then(r=>{if(r?.success)setStandards(r.data);});},[tab]);
@@ -4116,9 +4992,94 @@ function CalibrationModule({ api }) {
     if(r?.success){setMsg({type:'success',text:`Certificate ${r.data.cert_no} issued${r.data.signed?' — RSA-2048 digital signature applied':''}`});setModal(null);load('certificates');}
     else setMsg({type:'error',text:r?.error});
   };
+  const createSrf=async()=>{
+    if(!srfForm.customer_name||!srfForm.service_type)return;
+    const r=await api.post('/api/calibration',{action:'create_srf',...srfForm});
+    if(r?.success){setMsg({type:'success',text:`SRF ${r.data.srf_no} submitted`});setModal(null);load('srf');}
+    else setMsg({type:'error',text:r?.error});
+  };
+  const reviewSrf=async(id,decision)=>{
+    const r=await api.post('/api/calibration',{action:'review_srf',id,decision,planned_date:new Date().toISOString().split('T')[0]});
+    if(r?.success){setMsg({type:'success',text:decision==='accept'?'SRF accepted — field job created':'SRF rejected'});load('srf');}
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  // ── ISO 17020 pre/post-work checklists, GPS+timestamp photo evidence ──────
+  const openJob = async (job) => {
+    const r = await api.get(`/api/calibration?section=job_detail&job_id=${job.id}`);
+    if(r?.success){
+      setJobDetail(r.data);
+      const [pre,post] = await Promise.all([
+        api.get('/api/calibration?section=inspection_checklist_template&stage=pre'),
+        api.get('/api/calibration?section=inspection_checklist_template&stage=post'),
+      ]);
+      setChecklistTemplate({ pre: pre?.data?.items||[], post: post?.data?.items||[] });
+      setChecklistState({});
+      setPhotoCapture({caption:'',file_name:'',file_data:'',lat:null,lng:null,gpsStatus:'idle'});
+    }
+  };
+
+  const submitChecklist = async (stage) => {
+    const items = (checklistTemplate[stage]||[]).map((item,i)=>({ item, ok: !!checklistState[`${stage}_${i}`], notes:'' }));
+    const r = await api.post('/api/calibration', { action:'submit_work_inspection', job_id: jobDetail.job.id, stage, checklist: items });
+    if(r?.success){
+      setMsg({type:r.data.result==='pass'?'success':'error', text:`${stage==='pre'?'Pre-work':'Post-work'} inspection: ${r.data.result.toUpperCase()}${r.data.result==='fail'?' — all items must be checked off to pass':''}`});
+      openJob(jobDetail.job);
+    } else setMsg({type:'error',text:r?.error});
+  };
+
+  const captureGps = () => {
+    setPhotoCapture(p=>({...p,gpsStatus:'locating'}));
+    if(!navigator.geolocation){ setPhotoCapture(p=>({...p,gpsStatus:'unsupported'})); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos=>setPhotoCapture(p=>({...p,lat:pos.coords.latitude,lng:pos.coords.longitude,gpsStatus:'ok'})),
+      ()=>setPhotoCapture(p=>({...p,gpsStatus:'denied'})),
+      { enableHighAccuracy:true, timeout:10000 }
+    );
+  };
+
+  const onPhotoFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => setPhotoCapture(p=>({...p,file_name:file.name,file_data:reader.result}));
+    reader.readAsDataURL(file);
+  };
+
+  const uploadJobPhoto = async () => {
+    if(!photoCapture.file_data||photoCapture.lat==null){ setMsg({type:'error',text:'Capture GPS location and choose a photo first'}); return; }
+    const r = await api.post('/api/calibration', {
+      action:'upload_job_photo', job_id: jobDetail.job.id, caption: photoCapture.caption,
+      lat: photoCapture.lat, lng: photoCapture.lng, captured_at: new Date().toISOString(),
+      file_name: photoCapture.file_name, file_data: photoCapture.file_data,
+    });
+    if(r?.success){ setMsg({type:'success',text:'Photo uploaded with GPS + timestamp'}); setPhotoCapture({caption:'',file_name:'',file_data:'',lat:null,lng:null,gpsStatus:'idle'}); openJob(jobDetail.job); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const startJob = async () => {
+    const r = await api.post('/api/calibration', { action:'start_job', job_id: jobDetail.job.id });
+    if(r?.success){ setMsg({type:'success',text:'Job started'}); openJob(jobDetail.job); load('jobs'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const completeJob = async () => {
+    const r = await api.post('/api/calibration', { action:'complete_job', job_id: jobDetail.job.id });
+    if(r?.success){ setMsg({type:'success',text:'Job marked complete'}); setJobDetail(null); load('jobs'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  // BILL-001: once a job is complete, this is the other end of the
+  // "jobs weren't connected to billing at all" fix — turns the job into
+  // a real invoice (using its linked quote's priced lines if it has one)
+  // without leaving the module to re-type anything into Tax/Finance.
+  const generateJobInvoice = async () => {
+    const r = await api.post('/api/calibration', { action:'generate_job_invoice', job_id: jobDetail.job.id, submit_to_etims: true });
+    if(r?.success){ setMsg({type:'success',text:`Invoice ${r.data.invoice_no} generated — Total: ${fmt.kes(r.data.total)}`}); setJobDetail(null); load('jobs'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
   return(<div>
     {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-    <Tabs tabs={[{id:'certificates',label:'Certificates'},{id:'standards',label:'Reference Standards'},{id:'procedures',label:'Procedures & Templates'},{id:'uncertainty',label:'Uncertainty Budget'}]} active={tab} setActive={t=>setTab(t)}/>
+    <Tabs tabs={[{id:'certificates',label:'Certificates'},{id:'standards',label:'Reference Standards'},{id:'uncertainty',label:'Uncertainty Budget'},{id:'srf',label:`Service Requests (${srfs.filter(s=>s.status==='submitted').length})`},{id:'jobs',label:'Field Jobs'},{id:'procedures',label:'Procedures Library'}]} active={tab} setActive={t=>setTab(t)}/>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:18}}>
       <Stat label="Certs Issued" value={certs.length} icon="📜" variant="green"/>
       <Stat label="Passed" value={certs.filter(c=>c.result==='pass').length} icon="✅" variant="green"/>
@@ -4141,7 +5102,8 @@ function CalibrationModule({ api }) {
                   <div key={l}><div style={{fontSize:9,color:T.mgrey,fontWeight:700,textTransform:'uppercase'}}>{l}</div><div style={{fontSize:12,fontWeight:600,color:T.navy,marginTop:2}}>{v}</div></div>
                 ))}
               </div>
-              {c.tech_sig&&<div style={{background:T.greenL,padding:'6px 10px',borderRadius:6,fontSize:11,color:T.green}}>🔐 RSA-2048 signature applied</div>}
+              {c.tech_sig&&<div style={{background:T.greenL,padding:'6px 10px',borderRadius:6,fontSize:11,color:T.green,marginBottom:8}}>🔐 RSA-2048 signature applied</div>}
+              <DocPdfButton api={api} label="Download Certificate PDF" variant="primary" url={`/api/calibration?section=cert_pdf&id=${c.id}`}/>
             </Card>
           ))
         )}
@@ -4152,17 +5114,153 @@ function CalibrationModule({ api }) {
             rows={standards.map(r=>[<div><strong style={{fontSize:12}}>{r.name}</strong><div style={{fontSize:10,color:T.mgrey}}>{r.make} {r.model}</div></div>,<div style={{fontSize:11}}><span style={{color:T.gold,fontWeight:700}}>QSL</span> → {r.traceable_to||'KEBS'} → BIPM</div>,fmt.date(r.last_cal_date),<span style={{color:r.status!=='current'?T.amber:T.green,fontWeight:600}}>{fmt.date(r.next_cal_date)}</span>,<span style={{fontFamily:'monospace',fontSize:11}}>{r.uncertainty||'—'}</span>,<Badge variant={r.status==='current'?'green':'amber'}>{r.status}</Badge>])}
           />
         </Card>
-      </>):tab==='procedures'?(<>
-        <SectionHeader title="Calibration Procedures & Document Templates" sub="ISO/IEC 17025 methods (EURAMET / OIML) and the certificate output template"/>
-        <Alert type="info">Controlled documents — open to view or print. Procedures define the method, traceability and uncertainty model for each measurement discipline.</Alert>
+      </>):tab==='uncertainty'?(
+        <Card>
+          <SectionHeader title="Uncertainty Budget — GUM Compliant" sub="ISO 17025 Clause 7.6 — Pressure Calibration Example"/>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr>{['Source','Distribution','Divisor','Std Uncertainty','Sensitivity','ui×ci','DoF'].map(h=><th key={h} style={{background:T.navy,color:T.white,padding:'7px 10px',textAlign:'left',fontSize:11,fontWeight:600}}>{h}</th>)}</tr></thead>
+            <tbody>
+              {[['Reference standard accuracy','Normal','2','0.025%','1.0','0.025%','∞'],['Resolution','Rectangular','√3','0.006%','1.0','0.006%','∞'],['Temperature effect','Normal','2','0.010%','1.0','0.010%','∞'],['Repeatability','Normal','1','0.015%','1.0','0.015%','9']].map(([src,...cells],i)=>(
+                <tr key={i} style={{background:i%2===0?T.offwt:T.white}}>
+                  <td style={{padding:'8px 10px',fontWeight:500,color:T.navy}}>{src}</td>
+                  {cells.map((c,j)=><td key={j} style={{padding:'8px 10px',textAlign:'center',fontFamily:j>=2?'monospace':'inherit',fontSize:11}}>{c}</td>)}
+                </tr>
+              ))}
+              <tr style={{background:T.navy}}><td colSpan={5} style={{padding:'9px 10px',fontWeight:700,color:T.white}}>Expanded Uncertainty U (k=2, 95.45%)</td><td style={{padding:'9px 10px',textAlign:'center',fontFamily:'monospace',fontWeight:800,color:T.gold,fontSize:14}}>±0.064%</td><td/></tr>
+            </tbody>
+          </table>
+        </Card>
+      ):tab==='srf'?(<>
+        <SectionHeader title="Service Request Forms — field/sales intake" sub="Reviewed by Technical before a field job is scheduled" action={<Btn onClick={()=>setModal('srf')}>+ New SRF</Btn>}/>
         <Card style={{padding:0,overflow:'hidden'}}>
-          <DataTable headers={['Document','Type','Reference Method','']}
-            rows={CAL_DOCUMENTS.map(d=>[
-              <strong style={{fontSize:12,color:T.navy}}>{d.name}</strong>,
-              <Badge variant={d.kind==='template'?'navy':'blue'}>{d.kind}</Badge>,
-              <span style={{fontSize:11,color:T.mgrey}}>{d.ref}</span>,
-              <Btn size="sm" variant="ghost" onClick={()=>window.open(`/templates/calibration/${d.file}`,'_blank','noopener')}>View / Print</Btn>,
-            ])}/>
+          <DataTable headers={['SRF No','Customer','Service Type','Location','Preferred Date','Status','']} empty="No service requests yet."
+            rows={srfs.map(s=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{s.srf_no}</span>,
+              <div><strong style={{fontSize:12}}>{s.customer_name}</strong><div style={{fontSize:10,color:T.mgrey}}>{s.contact_person}</div></div>,
+              s.service_type,
+              <Badge variant="navy">{s.service_location}</Badge>,
+              fmt.date(s.preferred_date),
+              <Badge variant={s.status==='accepted'?'green':s.status==='rejected'?'red':'amber'}>{s.status}</Badge>,
+              <div style={{display:'flex',gap:4}}>
+                {s.status==='submitted'&&<><Btn size="sm" onClick={()=>reviewSrf(s.id,'accept')}>Accept</Btn><Btn size="sm" variant="ghost" onClick={()=>reviewSrf(s.id,'reject')}>Reject</Btn></>}
+                <DocPdfButton api={api} url={`/api/calibration?section=srf_pdf&id=${s.id}`}/>
+              </div>,
+            ])}
+          />
+        </Card>
+      </>):tab==='jobs'?(<>
+        <SectionHeader title="Field Jobs" sub="Scheduled calibration/maintenance visits — printable Job Card for the technician"/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Job No','Client','Site','Scheduled','Technician','Status','Billing','']} empty="No field jobs scheduled."
+            rows={jobs.map(j=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{j.job_no}</span>,
+              j.client_name, j.site||'—', fmt.date(j.scheduled_date),
+              j.technician_name||<Badge variant="amber">Unassigned</Badge>,
+              <Badge variant={j.status==='complete'?'green':j.status==='scheduled'?'blue':'amber'}>{j.status}</Badge>,
+              j.status!=='complete' ? <span style={{fontSize:11,color:T.mgrey}}>—</span>
+                : j.billing_status==='invoiced' ? <Badge variant="blue">Invoiced</Badge>
+                : <Badge variant="amber">Unbilled</Badge>,
+              <div style={{display:'flex',gap:4}}>
+                <Btn size="sm" onClick={()=>openJob(j)}>Open</Btn>
+                <DocPdfButton api={api} label="Job Card" url={`/api/calibration?section=job_card_pdf&id=${j.id}`}/>
+              </div>,
+            ])}
+          />
+        </Card>
+
+        {jobDetail&&(
+          <Modal title={`Field Job — ${jobDetail.job.job_no}`} onClose={()=>setJobDetail(null)} width={680}>
+            <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+              <Badge variant="navy">{jobDetail.job.client_name}</Badge>
+              <Badge variant="default">{jobDetail.job.site||'—'}</Badge>
+              <Badge variant={jobDetail.job.status==='complete'?'green':jobDetail.job.status==='in_progress'?'amber':'blue'}>{jobDetail.job.status}</Badge>
+              {jobDetail.job.status==='complete'&&(
+                jobDetail.job.billing_status==='invoiced'
+                  ? <Badge variant="blue">✓ Invoiced</Badge>
+                  : <Badge variant="amber">Not yet billed</Badge>
+              )}
+            </div>
+
+            <div style={{fontWeight:700,fontSize:13,color:T.navy,marginBottom:8}}>1. ISO 17020 Pre-Work Inspection {jobDetail.pre_work_done&&<Badge variant="green">✓ Passed</Badge>}</div>
+            {!jobDetail.pre_work_done&&(
+              <div style={{background:T.offwt,padding:12,borderRadius:8,marginBottom:16}}>
+                {checklistTemplate.pre.map((item,i)=>(
+                  <label key={i} style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:12,padding:'5px 0',cursor:'pointer'}}>
+                    <input type="checkbox" checked={!!checklistState[`pre_${i}`]} onChange={e=>setChecklistState({...checklistState,[`pre_${i}`]:e.target.checked})} style={{marginTop:2}}/>
+                    {item}
+                  </label>
+                ))}
+                <Btn size="sm" onClick={()=>submitChecklist('pre')} style={{marginTop:8}}>Submit Pre-Work Inspection</Btn>
+              </div>
+            )}
+
+            <div style={{fontWeight:700,fontSize:13,color:T.navy,marginBottom:8}}>2. Start / Work Status</div>
+            <div style={{marginBottom:16}}>
+              {jobDetail.job.status==='scheduled'&&<Btn onClick={startJob} disabled={!jobDetail.pre_work_done}>Start Job</Btn>}
+              {jobDetail.job.status==='scheduled'&&!jobDetail.pre_work_done&&<p style={{fontSize:11,color:T.mgrey,marginTop:6}}>Complete the pre-work inspection above to start.</p>}
+              {jobDetail.job.status!=='scheduled'&&<Badge variant="blue">Work in progress / complete</Badge>}
+            </div>
+
+            <div style={{fontWeight:700,fontSize:13,color:T.navy,marginBottom:8}}>3. Photo Evidence — Equipment Serviced/Repaired ({jobDetail.photos.length})</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(110px,1fr))',gap:8,marginBottom:10}}>
+              {jobDetail.photos.map(p=>(
+                <a key={p.id} href={`${p.url}?token=${authToken(api)}`} target="_blank" rel="noopener noreferrer" style={{display:'block'}}>
+                  <img src={`${p.url}?token=${authToken(api)}`} alt={p.caption||'job photo'} style={{width:'100%',height:80,objectFit:'cover',borderRadius:6,border:`1px solid ${T.lgrey}`}}/>
+                  <div style={{fontSize:9,color:T.mgrey,marginTop:2}}>{fmt.date(p.captured_at)} · {p.lat?.toFixed(3)},{p.lng?.toFixed(3)}</div>
+                </a>
+              ))}
+            </div>
+            <div style={{background:T.offwt,padding:12,borderRadius:8,marginBottom:16}}>
+              <input type="file" accept="image/*" capture="environment" onChange={e=>{const f=e.target.files?.[0]; if(f) onPhotoFile(f);}} style={{fontSize:12,display:'block',marginBottom:8}}/>
+              <Input label="Caption" value={photoCapture.caption} onChange={v=>setPhotoCapture({...photoCapture,caption:v})} placeholder="e.g. Before repair, sensor housing"/>
+              <div style={{display:'flex',alignItems:'center',gap:10,marginTop:8}}>
+                <Btn size="sm" variant="ghost" onClick={captureGps}>📍 Capture GPS Location</Btn>
+                {photoCapture.gpsStatus==='locating'&&<span style={{fontSize:11,color:T.mgrey}}>Locating…</span>}
+                {photoCapture.gpsStatus==='ok'&&<span style={{fontSize:11,color:T.green}}>✓ {photoCapture.lat.toFixed(5)}, {photoCapture.lng.toFixed(5)}</span>}
+                {photoCapture.gpsStatus==='denied'&&<span style={{fontSize:11,color:T.red}}>Location permission denied</span>}
+                {photoCapture.gpsStatus==='unsupported'&&<span style={{fontSize:11,color:T.red}}>GPS not supported on this device</span>}
+              </div>
+              <Btn size="sm" onClick={uploadJobPhoto} disabled={!photoCapture.file_data||photoCapture.lat==null} style={{marginTop:10}}>Upload Photo</Btn>
+            </div>
+
+            <div style={{fontWeight:700,fontSize:13,color:T.navy,marginBottom:8}}>4. ISO 17020 Post-Work Inspection {jobDetail.post_work_done&&<Badge variant="green">✓ Passed</Badge>}</div>
+            {!jobDetail.post_work_done&&(
+              <div style={{background:T.offwt,padding:12,borderRadius:8,marginBottom:16}}>
+                {checklistTemplate.post.map((item,i)=>(
+                  <label key={i} style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:12,padding:'5px 0',cursor:'pointer'}}>
+                    <input type="checkbox" checked={!!checklistState[`post_${i}`]} onChange={e=>setChecklistState({...checklistState,[`post_${i}`]:e.target.checked})} style={{marginTop:2}}/>
+                    {item}
+                  </label>
+                ))}
+                <Btn size="sm" onClick={()=>submitChecklist('post')} style={{marginTop:8}}>Submit Post-Work Inspection</Btn>
+              </div>
+            )}
+
+            <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:10}}>
+              <Btn variant="ghost" onClick={()=>setJobDetail(null)}>Close</Btn>
+              {jobDetail.job.status==='complete'&&jobDetail.job.billing_status!=='invoiced'&&(
+                jobDetail.job.quote_id
+                  ? <Btn onClick={generateJobInvoice}>Generate Invoice</Btn>
+                  : <span style={{fontSize:11,color:T.mgrey,alignSelf:'center'}}>No linked quote — bill via Finance → Documents → Invoices instead</span>
+              )}
+              <Btn onClick={completeJob} disabled={!jobDetail.post_work_done||!jobDetail.photos.length||jobDetail.job.status==='complete'}>{jobDetail.job.status==='complete'?'Job Complete':'Mark Job Complete'}</Btn>
+            </div>
+            {(!jobDetail.post_work_done||!jobDetail.photos.length)&&jobDetail.job.status!=='complete'&&(
+              <p style={{fontSize:11,color:T.mgrey,marginTop:6,textAlign:'right'}}>Requires a passed post-work inspection and at least one photo.</p>
+            )}
+          </Modal>
+        )}
+      </>):tab==='procedures'?(<>
+        <SectionHeader title="ISO 17025 Calibration Procedures Library" sub="Reference SOPs — one per measurement discipline"/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Code','Title','Discipline','']}
+            rows={procedures.map(p=>[
+              <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{p.code}</span>,
+              p.title,
+              <Badge variant="navy">{p.discipline}</Badge>,
+              <Btn size="sm" variant="ghost" onClick={()=>window.open(p.url,'_blank')}>📄 View</Btn>,
+            ])}
+          />
         </Card>
       </>):(
         <Card>
@@ -4182,12 +5280,35 @@ function CalibrationModule({ api }) {
         </Card>
       )
     )}
+    {modal==='srf'&&(
+      <Modal title="New Service Request Form" onClose={()=>setModal(null)} width={580}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Customer Name" value={srfForm.customer_name} onChange={v=>setSrfForm({...srfForm,customer_name:v})} required/>
+          <Input label="Contact Person" value={srfForm.contact_person} onChange={v=>setSrfForm({...srfForm,contact_person:v})}/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Telephone" value={srfForm.telephone} onChange={v=>setSrfForm({...srfForm,telephone:v})}/>
+          <Input label="Email" value={srfForm.email} onChange={v=>setSrfForm({...srfForm,email:v})} type="email"/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Select label="Service Type" value={srfForm.service_type} onChange={v=>setSrfForm({...srfForm,service_type:v})} options={['Calibration','Maintenance','Repair','Installation'].map(s=>({value:s,label:s}))}/>
+          <Select label="Location" value={srfForm.service_location} onChange={v=>setSrfForm({...srfForm,service_location:v})} options={[{value:'lab',label:'QSL Lab'},{value:'site',label:'Client Site'}]}/>
+        </div>
+        <Input label="Description / Equipment" value={srfForm.description} onChange={v=>setSrfForm({...srfForm,description:v})}/>
+        <Input label="Preferred Date" value={srfForm.preferred_date} onChange={v=>setSrfForm({...srfForm,preferred_date:v})} type="date"/>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Applicant Name" value={srfForm.applicant_name} onChange={v=>setSrfForm({...srfForm,applicant_name:v})}/>
+          <Input label="Applicant Designation" value={srfForm.applicant_designation} onChange={v=>setSrfForm({...srfForm,applicant_designation:v})}/>
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createSrf} disabled={!srfForm.customer_name}>Submit SRF</Btn></div>
+      </Modal>
+    )}
     {modal==='cert'&&(
-      <Modal title="Issue Certificate — ISO 17025" onClose={()=>setModal(null)} width={580}>
+      <Modal title="Issue Certificate — ISO 17025" onClose={()=>setModal(null)} width={680}>
         <Alert type="info">RSA-2048 digital signature auto-applied. Certificate number auto-generated.</Alert>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
           <Select label="Client" value={form.client_id} onChange={v=>setForm({...form,client_id:v})} required options={[{value:'',label:'Select client…'},...clients.map(c=>({value:c.id,label:c.name}))]}/>
-          <Select label="Result" value={form.result} onChange={v=>setForm({...form,result:v})} options={[{value:'pass',label:'✅ Pass'},{value:'fail',label:'❌ Fail'}]}/>
+          <Select label="Result" value={form.result} onChange={v=>setForm({...form,result:v})} options={[{value:'pass',label:'Pass'},{value:'fail',label:'Fail'}]}/>
           <Select label="Instrument Type" value={form.instrument_type} onChange={v=>setForm({...form,instrument_type:v})} options={[{value:'general',label:'General'},{value:'nawi',label:'NAWI (Weighing — cg-18)'}]}/>
         </div>
         <Input label="Instrument" value={form.instrument} onChange={v=>setForm({...form,instrument:v})} required placeholder="Make, model, type"/>
@@ -5263,6 +6384,7 @@ export default function Dashboard() {
   const [user, setUser]         = useState(null);
   const [alertCount, setAlertCount] = useState(0);
   const [branding, setBranding] = useState({primary_color:'#1B3A5C',accent_color:'#C8960C',font_family:'Inter',company_display_name:'QSL ERP',logo_url:null});
+  const [pendingAppraisal, setPendingAppraisal] = useState(null);
 
   // Inline useApi to avoid import issues
   const getToken = () => typeof window!=='undefined'?localStorage.getItem('qsl_token'):null;
@@ -5276,7 +6398,7 @@ export default function Dashboard() {
       return data;
     } catch(e){ return{success:false,error:'Network error'}; }
   },[router]);
-  const api = { get: url=>request(url), post: (url,body)=>request(url,{method:'POST',body:JSON.stringify(body)}), put:(url,body)=>request(url,{method:'PUT',body:JSON.stringify(body)}), getUser:()=>{try{return JSON.parse(localStorage.getItem('qsl_user')||'null')}catch{return null}} };
+  const api = { get: url=>request(url), post: (url,body)=>request(url,{method:'POST',body:JSON.stringify(body)}), put:(url,body)=>request(url,{method:'PUT',body:JSON.stringify(body)}), del:url=>request(url,{method:'DELETE'}), getUser:()=>{try{return JSON.parse(localStorage.getItem('qsl_user')||'null')}catch{return null}}, getToken };
 
   useEffect(()=>{
     const token=getToken();
@@ -5292,6 +6414,10 @@ export default function Dashboard() {
         setAlertCount((d.overdue_imprest?.count||0)+(d.overdue_tasks||0)+(d.expiring_docs||0));
       }
     });
+    // APR-001: end-of-month self-appraisal pop-up — checked once per login/refresh
+    api.get('/api/hr?section=pending_appraisal').then(r=>{
+      if(r?.success && r.data.pending) setPendingAppraisal(r.data.period);
+    });
   },[]);
 
   const logout = () => {
@@ -5306,7 +6432,7 @@ export default function Dashboard() {
     switch(active) {
       case 'dashboard':    return <DashboardHome api={api} setActive={setActive}/>;
       case 'me':           return <MyWorkspace api={api} user={user}/>;
-      case 'finance':      return <Finance api={api}/>;
+      case 'finance':      return <Finance api={api} user={user}/>;
       case 'tax':          return <TaxModule api={api}/>;
       case 'projects':     return <Projects api={api}/>;
       case 'hr':           return <HR api={api}/>;
@@ -5316,6 +6442,7 @@ export default function Dashboard() {
       case 'admin':        return <AdminModule api={api} user={user}/>;
       case 'settings':     return <Settings api={api} user={user}/>;
       case 'crm':          return <CRMModule api={api}/>;
+      case 'shop':         return <ShopModule api={api} user={user}/>;
       case 'debtors':      return <DebtorsModule api={api} user={user}/>;
       case 'stores':       return <StoresModule api={api} user={user}/>;
       case 'requisitions': return <RequisitionsModule api={api} user={user}/>;
@@ -5347,6 +6474,66 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+      {pendingAppraisal&&<AppraisalPopup api={api} period={pendingAppraisal} onDone={()=>setPendingAppraisal(null)}/>}
     </>
+  );
+}
+
+// ── MONTHLY SELF-APPRAISAL POP-UP ───────────────────────────────────────────
+// Appears on every staff portal once the previous month has closed and no
+// appraisal has been submitted for it yet. System-guided: fixed prompts for
+// achievements/challenges/next-month plan plus a self-score. Submission is
+// shared automatically with the employee's manager and HR via the
+// appraisals_for_review / appraisals_hr_queue endpoints.
+function AppraisalPopup({ api, period, onDone }) {
+  const [form,setForm] = useState({ achievements:'', challenges:'', next_month_plan:'', self_score:'' });
+  const [saving,setSaving] = useState(false);
+  const [err,setErr] = useState('');
+  const monthLabel = new Date(period+'-01').toLocaleDateString('en-KE',{month:'long',year:'numeric'});
+
+  const submit = async () => {
+    if(!form.achievements.trim()){ setErr('Please describe your key achievements for the month.'); return; }
+    setSaving(true);
+    const r = await api.post('/api/hr', { action:'submit_appraisal', period, ...form, self_score: form.self_score?parseFloat(form.self_score):null });
+    setSaving(false);
+    if(r?.success) onDone();
+    else setErr(r?.error||'Could not submit — please try again.');
+  };
+
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:9999}}>
+      <div style={{background:'#fff',borderRadius:14,width:560,maxWidth:'92vw',maxHeight:'88vh',overflowY:'auto',padding:28,boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+          <span style={{fontSize:22}}>📝</span>
+          <h2 style={{fontSize:17,fontWeight:700,color:'#1B3A5C'}}>Monthly Self-Appraisal — {monthLabel}</h2>
+        </div>
+        <p style={{fontSize:12.5,color:'#6B7280',marginBottom:18}}>Please complete your appraisal for {monthLabel}. This will be shared with your manager and HR for review.</p>
+
+        <label style={{display:'block',fontSize:12,fontWeight:600,color:'#374151',marginBottom:5}}>Key achievements this month <span style={{color:'#DC2626'}}>*</span></label>
+        <textarea value={form.achievements} onChange={e=>setForm({...form,achievements:e.target.value})} rows={4}
+          placeholder="What did you accomplish this month? Be specific — projects completed, targets met, problems solved..."
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E5E7EB',borderRadius:7,fontSize:13,marginBottom:14,fontFamily:'inherit',resize:'vertical'}}/>
+
+        <label style={{display:'block',fontSize:12,fontWeight:600,color:'#374151',marginBottom:5}}>Challenges faced</label>
+        <textarea value={form.challenges} onChange={e=>setForm({...form,challenges:e.target.value})} rows={3}
+          placeholder="What got in the way, and how did you handle it?"
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E5E7EB',borderRadius:7,fontSize:13,marginBottom:14,fontFamily:'inherit',resize:'vertical'}}/>
+
+        <label style={{display:'block',fontSize:12,fontWeight:600,color:'#374151',marginBottom:5}}>Plan for next month</label>
+        <textarea value={form.next_month_plan} onChange={e=>setForm({...form,next_month_plan:e.target.value})} rows={3}
+          placeholder="What are you focusing on next?"
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E5E7EB',borderRadius:7,fontSize:13,marginBottom:14,fontFamily:'inherit',resize:'vertical'}}/>
+
+        <label style={{display:'block',fontSize:12,fontWeight:600,color:'#374151',marginBottom:5}}>Self-score (0–100, optional)</label>
+        <input type="number" min="0" max="100" value={form.self_score} onChange={e=>setForm({...form,self_score:e.target.value})} placeholder="e.g. 85"
+          style={{width:140,padding:'9px 12px',border:'1.5px solid #E5E7EB',borderRadius:7,fontSize:13,marginBottom:18}}/>
+
+        {err&&<div style={{background:'#FEF2F2',border:'1px solid #FCA5A5',color:'#DC2626',padding:'8px 12px',borderRadius:7,fontSize:12,marginBottom:14}}>{err}</div>}
+
+        <div style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+          <button onClick={submit} disabled={saving} style={{background:'#1B3A5C',color:'#fff',border:'none',padding:'10px 22px',borderRadius:8,fontSize:13,fontWeight:600,cursor:saving?'default':'pointer',opacity:saving?0.6:1}}>{saving?'Submitting…':'Submit Appraisal'}</button>
+        </div>
+      </div>
+    </div>
   );
 }

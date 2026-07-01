@@ -28,46 +28,7 @@
 import { v4 as uuid } from 'uuid';
 import { requireAuth, requirePermission, requireModuleEnabled, userHasPermission, ok, err, logAudit } from '../../../lib/auth';
 import { query, queryOne, run } from '../../../lib/db';
-
-async function getBalance(item_id, location_id, batch_no) {
-  const row = await queryOne(
-    `SELECT quantity FROM stock_balances WHERE item_id=? AND location_id=? AND ${batch_no ? 'batch_no=?' : 'batch_no IS NULL'}`,
-    batch_no ? [item_id, location_id, batch_no] : [item_id, location_id]
-  );
-  return row ? row.quantity : 0;
-}
-
-async function setBalance(item_id, location_id, batch_no, newQty) {
-  const existing = await queryOne(
-    `SELECT id FROM stock_balances WHERE item_id=? AND location_id=? AND ${batch_no ? 'batch_no=?' : 'batch_no IS NULL'}`,
-    batch_no ? [item_id, location_id, batch_no] : [item_id, location_id]
-  );
-  if (existing) {
-    await run(`UPDATE stock_balances SET quantity=?, updated_at=datetime('now') WHERE id=?`, [newQty, existing.id]);
-  } else {
-    await run(`INSERT INTO stock_balances (id, item_id, location_id, batch_no, quantity) VALUES (?,?,?,?,?)`,
-      [uuid(), item_id, location_id, batch_no || null, newQty]);
-  }
-}
-
-async function checkLowStock(item_id, location_id) {
-  const item = await queryOne(`SELECT reorder_level FROM items WHERE id=?`, [item_id]);
-  if (!item) return;
-  const totalRow = await queryOne(`SELECT SUM(quantity) as total FROM stock_balances WHERE item_id=?`, [item_id]);
-  const total = totalRow?.total || 0;
-  if (total <= (item.reorder_level || 0)) {
-    const existingAlert = await queryOne(`SELECT id FROM low_stock_alerts WHERE item_id=? AND location_id=? AND status='open'`, [item_id, location_id]);
-    if (!existingAlert) {
-      await run(
-        `INSERT INTO low_stock_alerts (id, item_id, location_id, current_qty, reorder_level) VALUES (?,?,?,?,?)`,
-        [uuid(), item_id, location_id, total, item.reorder_level || 0]
-      );
-    }
-  } else {
-    // Stock replenished above reorder level — auto-resolve any open alert
-    await run(`UPDATE low_stock_alerts SET status='resolved' WHERE item_id=? AND status='open'`, [item_id]);
-  }
-}
+const { getBalance, setBalance, checkLowStock } = require('../../../lib/stock');
 
 export async function GET(req) {
   const auth = await requireAuth(req);

@@ -221,11 +221,24 @@ export async function PUT(req) {
   const parsed = parseCallback(body);
 
   if (parsed?.success) {
-    // Update payment record in DB
-    await run(
-      `UPDATE tax_invoices SET status='paid' WHERE invoice_no=? OR id=?`,
+    const invoice = await queryOne(
+      `SELECT id, total, amount_paid FROM tax_invoices WHERE invoice_no=? OR id=?`,
       [parsed.mpesaReceiptNumber, parsed.checkoutRequestId]
     );
+    if (invoice) {
+      const { v4: uuidv4 } = require('uuid');
+      const amount = Number(parsed.amount) || invoice.total;
+      await run(
+        `INSERT INTO invoice_payments (id,invoice_id,amount,method,reference,date,notes) VALUES (?,?,?,?,?,date('now'),?)`,
+        [uuidv4(), invoice.id, amount, 'mpesa', parsed.mpesaReceiptNumber, `Auto-recorded from M-Pesa STK callback (phone ${parsed.phoneNumber || 'unknown'})`]
+      );
+      const newAmountPaid = (invoice.amount_paid || 0) + amount;
+      const paymentStatus = newAmountPaid >= invoice.total ? 'paid' : 'partially_paid';
+      await run(
+        `UPDATE tax_invoices SET status='paid', payment_status=?, amount_paid=? WHERE id=?`,
+        [paymentStatus, newAmountPaid, invoice.id]
+      );
+    }
   }
 
   const { v4: uuidv4 } = require('uuid');
