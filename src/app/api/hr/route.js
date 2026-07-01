@@ -75,6 +75,32 @@ export async function GET(req) {
         return ok(await query(sql, params));
       }
 
+      // QSL_LeaveApplication_Template — branded Leave Application PDF
+      case 'leave_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const lr = await queryOne(
+          `SELECT lr.*, e.first_name||' '||e.last_name as employee_name, e.department, e.emp_no,
+                  a.first_name||' '||a.last_name as approver_name
+           FROM leave_requests lr JOIN employees e ON lr.employee_id=e.id
+           LEFT JOIN employees a ON lr.approved_by=a.id WHERE lr.id=?`, [id]);
+        if (!lr) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('leave_application', {
+          docNo: `LV-${lr.id.slice(0, 8).toUpperCase()}`,
+          blocks: {
+            Employee: { Name: lr.employee_name, 'Emp No': lr.emp_no, Department: lr.department },
+            Leave:    { Type: lr.leave_type, From: lr.start_date, To: lr.end_date, Days: lr.days, Status: lr.status },
+          },
+          body: [
+            `Reason: ${lr.reason || '—'}`,
+            lr.approver_name ? `Decision recorded by: ${lr.approver_name}` : 'Awaiting approval.',
+          ],
+        });
+        return ok(result);
+      }
+
       case 'kpi_summary': {
         const period = searchParams.get('period') || new Date().getFullYear().toString();
         const rows = await query(
@@ -165,6 +191,94 @@ export async function GET(req) {
         );
         const data = rows.map(r => ({ ...r, target: LD_TARGET, below_target: (r.l_and_d_hours||0) < LD_TARGET, q3_alert: isQ3 && (r.l_and_d_hours||0) < LD_TARGET }));
         return ok({ is_q3: isQ3, target: LD_TARGET, employees: data });
+      }
+
+      // CPD-001: recommended online CPD learning platforms (editable list)
+      case 'cpd_platforms': {
+        return ok(await query(`SELECT * FROM cpd_platforms WHERE is_active=1 ORDER BY sort_order`));
+      }
+
+      // CPD-002: an individual's CPD log + target attainment. Visible to the
+      // employee themselves, their manager (reporting_to), and HR — same
+      // visibility rule as the monthly appraisal below.
+      case 'cpd_log': {
+        const employee_id = searchParams.get('employee_id') || auth.user.employee_id;
+        const emp = await queryOne(`SELECT id, first_name, last_name, department, cpd_points, cpd_target, reporting_to FROM employees WHERE id=?`, [employee_id]);
+        if (!emp) return err('Employee not found', 404);
+        const logs = await query(
+          `SELECT cl.*, p.name as platform_name FROM cpd_logs cl LEFT JOIN cpd_platforms p ON cl.platform_id=p.id
+           WHERE cl.employee_id=? ORDER BY cl.date_completed DESC`, [employee_id]
+        );
+        return ok({ employee: emp, logs, attainment: emp.cpd_target ? (emp.cpd_points / emp.cpd_target) : 0 });
+      }
+
+      // CPD-003: company-wide CPD summary for HR — every employee's points
+      // vs target, and whether their manager has visibility (reporting_to set).
+      case 'cpd_summary': {
+        const rows = await query(
+          `SELECT e.id, e.first_name||' '||e.last_name as name, e.department, e.cpd_points, e.cpd_target,
+                  m.first_name||' '||m.last_name as manager_name
+           FROM employees e LEFT JOIN employees m ON e.reporting_to=m.id
+           WHERE e.status='active' ORDER BY (e.cpd_points*1.0/NULLIF(e.cpd_target,0))`
+        );
+        return ok(rows.map(r => ({ ...r, attainment: r.cpd_target ? (r.cpd_points / r.cpd_target) : 0, below_target: (r.cpd_points||0) < (r.cpd_target||0) })));
+      }
+
+      // CPD-004: direct reports' CPD — for a manager's own view (reporting_to=me)
+      case 'cpd_my_team': {
+        const rows = await query(
+          `SELECT id, first_name||' '||last_name as name, department, cpd_points, cpd_target FROM employees WHERE reporting_to=? AND status='active' ORDER BY first_name`,
+          [auth.user.employee_id]
+        );
+        return ok(rows.map(r => ({ ...r, attainment: r.cpd_target ? (r.cpd_points / r.cpd_target) : 0 })));
+      }
+
+      // APR-001: does the logged-in user have an unsubmitted appraisal for
+      // last month? Drives the end-of-month pop-up on every staff portal —
+      // only fires once the month being appraised has actually finished.
+      case 'pending_appraisal': {
+        const now = new Date();
+        const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const period = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}`;
+        const existing = await queryOne(`SELECT id, status FROM monthly_appraisals WHERE employee_id=? AND period=?`, [auth.user.employee_id, period]);
+        return ok({ period, pending: !existing || existing.status === 'pending', appraisal_id: existing?.id || null });
+      }
+
+      // APR-002: an individual's appraisal history. Visible to the employee,
+      // their manager, and HR.
+      case 'my_appraisals': {
+        const employee_id = searchParams.get('employee_id') || auth.user.employee_id;
+        const rows = await query(`SELECT * FROM monthly_appraisals WHERE employee_id=? ORDER BY period DESC LIMIT 24`, [employee_id]);
+        return ok(rows);
+      }
+
+      // APR-003: appraisals awaiting the logged-in manager's review (their direct reports)
+      case 'appraisals_for_review': {
+        const rows = await query(
+          `SELECT a.*, e.first_name||' '||e.last_name as employee_name, e.department
+           FROM monthly_appraisals a JOIN employees e ON a.employee_id=e.id
+           WHERE e.reporting_to=? AND a.status='submitted' ORDER BY a.period DESC`,
+          [auth.user.employee_id]
+        );
+        return ok(rows);
+      }
+
+      // APR-004: HR's full review queue — everything a manager has scored,
+      // awaiting HR sign-off, plus active performance warnings.
+      case 'appraisals_hr_queue': {
+        const rows = await query(
+          `SELECT a.*, e.first_name||' '||e.last_name as employee_name, e.department,
+                  m.first_name||' '||m.last_name as manager_name
+           FROM monthly_appraisals a JOIN employees e ON a.employee_id=e.id
+           LEFT JOIN employees m ON a.manager_id=m.id
+           WHERE a.status='manager_reviewed' ORDER BY a.period DESC`
+        );
+        const warnings = await query(
+          `SELECT pw.*, e.first_name||' '||e.last_name as employee_name, e.department
+           FROM performance_warnings pw JOIN employees e ON pw.employee_id=e.id
+           WHERE pw.status='active' ORDER BY pw.issued_at DESC`
+        );
+        return ok({ pending_hr_review: rows, active_warnings: warnings });
       }
 
       default:
@@ -350,6 +464,21 @@ export async function POST(req) {
         return ok({ id, hours_added: hours }, 201);
       }
 
+      // CPD-005: log a completed CPD activity against an employee's points
+      // target. Anyone can log their own; HR/manager can log on behalf of staff.
+      case 'log_cpd': {
+        const { employee_id, platform_id, activity, provider, points, date_completed, certificate_url, verification_url } = body;
+        const empId = employee_id || auth.user.employee_id;
+        if (!activity || !points) return err('activity and points required', 400);
+        const id = uuid();
+        await run(
+          `INSERT INTO cpd_logs (id,employee_id,platform_id,activity,provider,points,date_completed,certificate_url,verification_url,approved_by) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          [id, empId, platform_id || null, activity, provider || null, points, date_completed || new Date().toISOString().split('T')[0], certificate_url || null, verification_url || null, auth.user.employee_id]
+        );
+        await run(`UPDATE employees SET cpd_points = cpd_points + ? WHERE id=?`, [points, empId]);
+        return ok({ id, points_added: points }, 201);
+      }
+
       // ── HR-013/026: HR proposes a salary increment (blocked if L&D < target)
       case 'propose_increment': {
         const { employee_id, proposed_salary, effective_month, reason } = body;
@@ -466,6 +595,122 @@ export async function POST(req) {
         await run(`UPDATE employees SET helb_monthly=? WHERE id=?`, [parseFloat(helb_monthly)||0, employee_id]);
         await logAudit(query, { userId: auth.user.id, userName: auth.user.name, action: 'SET_HELB', module: 'HR', recordId: employee_id, newValue: { helb_monthly } });
         return ok({ updated: true });
+      }
+
+      // APR-005: employee submits their own end-of-month self-appraisal —
+      // the form behind the portal pop-up. Shared automatically with their
+      // manager (reporting_to) and HR via the appraisals_for_review /
+      // appraisals_hr_queue sections above once status progresses.
+      case 'submit_appraisal': {
+        const { period, achievements, challenges, next_month_plan, self_score } = body;
+        if (!period || !achievements) return err('period and achievements required', 400);
+        const empId = auth.user.employee_id;
+        const id = uuid();
+        await run(
+          `INSERT INTO monthly_appraisals (id,employee_id,period,achievements,challenges,next_month_plan,self_score,status)
+           VALUES (?,?,?,?,?,?,?,'submitted')
+           ON CONFLICT (employee_id, period) DO UPDATE SET achievements=excluded.achievements, challenges=excluded.challenges,
+             next_month_plan=excluded.next_month_plan, self_score=excluded.self_score, status='submitted'`,
+          [id, empId, period, achievements, challenges || null, next_month_plan || null, self_score || null]
+        );
+        return ok({ period, status: 'submitted' }, 201);
+      }
+
+      // APR-006: manager scores their direct report's appraisal. Forwards to
+      // HR once scored. A score below the configured warning threshold is
+      // visible to HR immediately via appraisals_hr_queue; the actual
+      // warning/termination escalation only fires once HR also reviews
+      // (hr_review_appraisal below), to avoid a manager's single low score
+      // alone triggering disciplinary action.
+      case 'manager_review_appraisal': {
+        const { appraisal_id, manager_score, manager_comments } = body;
+        if (!appraisal_id || manager_score == null) return err('appraisal_id and manager_score required', 400);
+        const ap = await queryOne(`SELECT a.*, e.reporting_to FROM monthly_appraisals a JOIN employees e ON a.employee_id=e.id WHERE a.id=?`, [appraisal_id]);
+        if (!ap) return err('Appraisal not found', 404);
+        if (ap.reporting_to !== auth.user.employee_id && auth.user.role !== 'md' && auth.user.role !== 'hr_manager')
+          return err('Only this employee\'s manager can review this appraisal', 403);
+        await run(
+          `UPDATE monthly_appraisals SET manager_score=?, manager_comments=?, manager_id=?, manager_reviewed_at=datetime('now'), status='manager_reviewed' WHERE id=?`,
+          [manager_score, manager_comments || null, auth.user.employee_id, appraisal_id]
+        );
+        return ok({ updated: true, status: 'manager_reviewed' });
+      }
+
+      // APR-007: HR reviews after the manager. Consecutive low-scoring
+      // months (manager_score below hr.appraisal_warning_score) escalate
+      // automatically: 1st -> warning, Nth (hr.appraisal_final_warning_count)
+      // -> final_warning, Mth (hr.appraisal_termination_count) ->
+      // termination_review. A non-consecutive good month resets the streak.
+      case 'hr_review_appraisal': {
+        const { appraisal_id, hr_comments } = body;
+        if (!appraisal_id) return err('appraisal_id required', 400);
+        const ap = await queryOne(`SELECT * FROM monthly_appraisals WHERE id=?`, [appraisal_id]);
+        if (!ap) return err('Appraisal not found', 404);
+
+        await run(
+          `UPDATE monthly_appraisals SET hr_reviewed_by=?, hr_reviewed_at=datetime('now'), hr_comments=?, status='hr_reviewed' WHERE id=?`,
+          [auth.user.employee_id, hr_comments || null, appraisal_id]
+        );
+
+        const s = require('../../../lib/settings');
+        const warningScore   = await s.getNum('hr.appraisal_warning_score', 50);
+        const finalWarnCount = await s.getNum('hr.appraisal_final_warning_count', 2);
+        const termCount      = await s.getNum('hr.appraisal_termination_count', 3);
+
+        const score = ap.manager_score != null ? ap.manager_score : ap.self_score;
+        let escalation = null;
+
+        if (score != null && score < warningScore) {
+          // Count this period plus the immediately preceding consecutive
+          // low-scoring periods (walk backwards month by month).
+          const history = await query(
+            `SELECT period, manager_score, self_score FROM monthly_appraisals WHERE employee_id=? AND period<=? ORDER BY period DESC LIMIT 12`,
+            [ap.employee_id, ap.period]
+          );
+          let streak = 0;
+          for (const h of history) {
+            const hScore = h.manager_score != null ? h.manager_score : h.self_score;
+            if (hScore != null && hScore < warningScore) streak++;
+            else break;
+          }
+
+          const level = streak >= termCount ? 'termination_review' : streak >= finalWarnCount ? 'final_warning' : 'warning';
+          const id = uuid();
+          await run(
+            `INSERT INTO performance_warnings (id,employee_id,level,reason,trigger_period,issued_by) VALUES (?,?,?,?,?,?)`,
+            [id, ap.employee_id, level,
+             `Score ${score} below threshold (${warningScore}) for ${streak} consecutive month(s).`,
+             ap.period, auth.user.employee_id]
+          );
+          escalation = { level, streak, warning_id: id };
+
+          if (level === 'termination_review') {
+            // Mirrors the disciplinary workflow already used elsewhere in HR —
+            // a termination review is opened as a disciplinary case for the
+            // formal process (investigation/show-cause/hearing) to follow,
+            // visible to HR and MD.
+            const caseId = uuid();
+            await run(
+              `INSERT INTO disciplinary_cases (id,case_no,employee_id,incident_desc,stage,status,reported_by)
+               VALUES (?,?,?,?,?,?,?)`,
+              [caseId, `TERM-${new Date().getFullYear()}-${String(Date.now()).slice(-4)}`, ap.employee_id,
+               `Performance: ${streak} consecutive months below the appraisal score threshold (latest period: ${ap.period}). Auto-opened by the appraisal system for termination review.`,
+               'incident', 'open', auth.user.employee_id]
+            );
+            escalation.disciplinary_case_id = caseId;
+          }
+        }
+
+        return ok({ updated: true, status: 'hr_reviewed', escalation });
+      }
+
+      // APR-008: HR/MD resolves an active performance warning (e.g. after
+      // improvement, or after the disciplinary process concludes).
+      case 'resolve_warning': {
+        const { warning_id, notes } = body;
+        if (!warning_id) return err('warning_id required', 400);
+        await run(`UPDATE performance_warnings SET status='resolved', resolved_at=datetime('now'), notes=? WHERE id=?`, [notes || null, warning_id]);
+        return ok({ resolved: true });
       }
 
       default:

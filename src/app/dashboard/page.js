@@ -156,6 +156,44 @@ function Tabs({ tabs, active, setActive }) {
   );
 }
 
+// Generic "Generate PDF" button used across every module to render one of the
+// QSL document templates (PR, LPO, GRN, Quote, NDA, Leave Application,
+// etc.) via the matching backend endpoint, then open the result.
+function DocPdfButton({ api, url, label = 'PDF', variant = 'ghost' }) {
+  const [loading, setLoading] = useState(false);
+  const variants = {
+    ghost:   { background:'transparent', border:`1px solid ${T.lgrey}`, color:T.navy },
+    primary: { background:T.navy, border:'none', color:T.white },
+  };
+  return (
+    <button
+      disabled={loading}
+      onClick={async (e) => {
+        e.stopPropagation();
+        setLoading(true);
+        try {
+          const res = await api.get(url);
+          if (res?.success && res.data?.url) {
+            window.open(res.data.url, '_blank');
+          } else {
+            alert(res?.error || 'Could not generate document');
+          }
+        } finally {
+          setLoading(false);
+        }
+      }}
+      style={{
+        ...variants[variant],
+        padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+        cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1,
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+      }}
+    >
+      📄 {loading ? 'Generating…' : label}
+    </button>
+  );
+}
+
 // ── NAV MODULES ──────────────────────────────────────────────────────────────
 const MODULES = [
   {id:'dashboard', label:'Dashboard',         icon:'📊', group:'overview'},
@@ -169,15 +207,16 @@ const MODULES = [
   {id:'requisitions',label:'Requisitions',    icon:'📝', group:'core'},
   {id:'assets',    label:'Fixed Assets',      icon:'🏗️', group:'core'},
   {id:'projects',  label:'Projects',          icon:'🏛️', group:'ops'},
-  {id:'crm',       label:'CRM & Sales',       icon:'🤝', group:'ops'},
+  {id:'crm',       label:'Commercial',        icon:'🤝', group:'ops'},
   {id:'fleet',     label:'Fleet',             icon:'🚗', group:'ops'},
   {id:'hse',       label:'HSE',               icon:'🦺', group:'ops'},
-  {id:'calibration',label:'Calibration',      icon:'🔬', group:'commercial'},
+  {id:'calibration',label:'Technical Department', icon:'🔬', group:'commercial'},
   {id:'inspection',label:'Inspection (17020)',icon:'🔍', group:'commercial'},
   {id:'bids',      label:'Bids & Pre-Sales',  icon:'📋', group:'commercial'},
   {id:'ic',        label:'Inter-Company',     icon:'🔗', group:'commercial'},
   {id:'integrations',label:'Integrations',   icon:'🌐', group:'commercial'},
   {id:'compliance',label:'Compliance',        icon:'✅', group:'governance'},
+  {id:'sops',      label:'SOP Library',       icon:'📚', group:'governance'},
   {id:'reports',   label:'Reports',           icon:'📈', group:'governance'},
   {id:'tasks',     label:'Tasks',             icon:'☑️', group:'governance'},
   {id:'admin',     label:'Administration',    icon:'🛡️', group:'governance'},
@@ -198,16 +237,18 @@ const MODULES = [
 // hide modules that should be visible. An explicit map is easier to audit
 // and correct than implicit derivation.
 const ROLE_MODULES = {
-  cfo:                 ['dashboard','finance','debtors','tax','assets','reports','tasks','settings'],
-  store_manager:       ['dashboard','stores','requisitions','procurement','reports','tasks','settings'],
-  store_clerk:         ['dashboard','stores','requisitions','tasks','settings'],
-  procurement_officer: ['dashboard','procurement','stores','requisitions','reports','tasks','settings'],
-  fleet_manager:       ['dashboard','fleet','requisitions','reports','tasks','settings'],
-  hr_manager:          ['dashboard','hr','reports','tasks','settings'],
-  project_manager:     ['dashboard','projects','crm','requisitions','tasks','reports','settings'],
-  technician:          ['dashboard','calibration','inspection','requisitions','stores','fleet','tasks','settings'],
-  qm:                  ['dashboard','calibration','inspection','compliance','reports','tasks','settings'],
-  staff:               ['dashboard','requisitions','tasks','settings'],
+  cfo:                 ['dashboard','finance','debtors','tax','assets','reports','tasks','sops','settings'],
+  store_manager:       ['dashboard','stores','requisitions','procurement','reports','tasks','sops','settings'],
+  store_clerk:         ['dashboard','stores','requisitions','tasks','sops','settings'],
+  procurement_officer: ['dashboard','procurement','stores','requisitions','reports','tasks','sops','settings'],
+  fleet_manager:       ['dashboard','fleet','requisitions','reports','tasks','sops','settings'],
+  hr_manager:          ['dashboard','hr','reports','tasks','sops','settings'],
+  project_manager:     ['dashboard','projects','crm','requisitions','tasks','reports','sops','settings'],
+  commercial_manager:  ['dashboard','crm','projects','requisitions','tasks','reports','sops','settings'],
+  sales_rep:           ['dashboard','crm','tasks','sops','settings'],
+  technician:          ['dashboard','calibration','inspection','requisitions','stores','fleet','tasks','sops','settings'],
+  qm:                  ['dashboard','calibration','inspection','compliance','reports','tasks','sops','settings'],
+  staff:               ['dashboard','requisitions','tasks','sops','settings'],
 };
 
 // md and admin bypass ROLE_MODULES entirely and see every module — this
@@ -357,7 +398,7 @@ function DashboardHome({ api, setActive }) {
         <Card>
           <SectionHeader title="Quick Actions" sub="Common tasks"/>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            {[['Request Imprest','finance'],['Post Expense','projects'],['New Lead','crm'],['Raise PR','procurement'],['Check Compliance','compliance'],['Run Tax Report','tax']].map(([label,mod])=>(
+            {[['Request Imprest','finance'],['Post Expense','projects'],['New Lead','crm'],['Raise PR','procurement'],['Check Compliance','compliance'],['Run Tax Report','tax'],['My Tasks','tasks'],['SOP Library','sops']].map(([label,mod])=>(
               <button key={label} onClick={()=>setActive(mod)} style={{padding:'12px',background:T.offwt,border:`1px solid ${T.lgrey}`,borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:600,color:T.navy,textAlign:'center'}}>{label}</button>
             ))}
           </div>
@@ -468,18 +509,6 @@ function DashboardHome({ api, setActive }) {
 }
 
 // ── FINANCE MODULE ──────────────────────────────────────────────────────────
-// Finance document templates served as static HTML from public/templates/finance.
-const FIN_DOCUMENTS = [
-  {name:'Tax Invoice',         ref:'KRA eTIMS / VAT invoice',     file:'QSL_Invoice_Template.html'},
-  {name:'Quotation',           ref:'Sales quotation',            file:'QSL_Quote_Template.html'},
-  {name:'Credit Note',         ref:'Receivables adjustment',     file:'QSL_CreditNote_Template.html'},
-  {name:'Debit Note',          ref:'Receivables adjustment',     file:'QSL_DebitNote_Template.html'},
-  {name:'Customer Statement',  ref:'Account statement',          file:'QSL_Statement_Template.html'},
-  {name:'Imprest Form',        ref:'QSL-FIN-CHP-001 — 14-day rule', file:'QSL_ImprestForm_Template.html'},
-  {name:'Travel Claim',        ref:'Expense reimbursement',      file:'QSL_TravelClaim_Template.html'},
-  {name:'Payslip',             ref:'Payroll',                    file:'QSL_Payslip_Template.html'},
-];
-
 function Finance({ api }) {
   const [tab,setTab]=useState('imprest');
   const [imprest,setImprest]=useState([]);
@@ -501,6 +530,16 @@ function Finance({ api }) {
   const [lpos,setLpos]=useState([]);
   const [matchForm,setMatchForm]=useState({lpo_id:'',invoice_no:'',invoice_amount:''});
   const [adhoc,setAdhoc]=useState({payee:'',amount:'',purpose:''});
+  // Document templates — Quote / Debit Note / Credit Note / Travel Claim (FIN documents tab)
+  const [docTab,setDocTab]=useState('quotes');
+  const [quotes,setQuotes]=useState([]);
+  const [debitNotes,setDebitNotes]=useState([]);
+  const [creditNotes,setCreditNotes]=useState([]);
+  const [travelClaims,setTravelClaims]=useState([]);
+  const [clientsList,setClientsList]=useState([]);
+  const [quoteForm,setQuoteForm]=useState({client_id:'',valid_until:'',lines:[{description:'',quantity:1,unit_price:''}]});
+  const [noteForm,setNoteForm]=useState({client_id:'',amount:'',reason:''});
+  const [claimForm,setClaimForm]=useState({employee_id:'',trip_purpose:'',destination:'',from_date:'',to_date:'',lines:[{date:'',description:'',amount:''}]});
   const [batchSel,setBatchSel]=useState([]);
   // GL maturity — FIN-001/002/003
   const [journals,setJournals]=useState([]);
@@ -530,6 +569,16 @@ function Finance({ api }) {
   const load = async (t=tab) => {
     setLoading(true);
     if(t==='imprest'){ const r=await api.get('/api/finance?section=imprest'); if(r?.success) setImprest(r.data); }
+    if(t==='documents'){
+      const [q,dn,cn,tc,cl]=await Promise.all([
+        api.get('/api/finance?section=quotes'), api.get('/api/finance?section=debit_notes'),
+        api.get('/api/finance?section=credit_notes'), api.get('/api/finance?section=travel_claims'),
+        api.get('/api/crm?section=clients')]);
+      if(q?.success)setQuotes(q.data); if(dn?.success)setDebitNotes(dn.data);
+      if(cn?.success)setCreditNotes(cn.data); if(tc?.success)setTravelClaims(tc.data);
+      if(cl?.success)setClientsList(cl.data);
+      if(employees.length===0){ const e=await api.get('/api/hr?section=employees'); if(e?.success)setEmployees(e.data); }
+    }
     if(t==='payroll'){ const r=await api.get('/api/finance?section=payroll&period=2026-06'); if(r?.success){setPayroll(r.data.run);setPayrollEntries(r.data.entries||[]);} }
     if(t==='gl'){ const r=await api.get('/api/finance?section=accounts'); if(r?.success) setAccounts(r.data); }
     if(t==='payments'){
@@ -564,6 +613,35 @@ function Finance({ api }) {
   };
   // FIN-011/012A imprest workflow
   const impAction = async (action,id,extra={}) => { const r=await api.post('/api/finance',{action,id,...extra}); if(r?.success){setMsg({type:'success',text:'Done'});load('imprest');} else setMsg({type:'error',text:r?.error}); };
+
+  // ── Document templates: Quote / Debit Note / Credit Note / Travel Claim ────
+  const createQuote = async () => {
+    const lines = quoteForm.lines.filter(l=>l.description&&l.unit_price).map(l=>({...l,quantity:parseFloat(l.quantity)||1,unit_price:parseFloat(l.unit_price)}));
+    if(!quoteForm.client_id||!lines.length) return;
+    const r = await api.post('/api/finance',{action:'create_quote',client_id:quoteForm.client_id,valid_until:quoteForm.valid_until,lines});
+    if(r?.success){ setMsg({type:'success',text:`Quote ${r.data.quote_no} created`}); setModal(null); setQuoteForm({client_id:'',valid_until:'',lines:[{description:'',quantity:1,unit_price:''}]}); load('documents'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const createNote = async (isDebit) => {
+    if(!noteForm.client_id||!noteForm.amount||!noteForm.reason) return;
+    const r = await api.post('/api/finance',{action:isDebit?'create_debit_note':'create_credit_note',client_id:noteForm.client_id,amount:parseFloat(noteForm.amount),reason:noteForm.reason});
+    if(r?.success){ setMsg({type:'success',text:`${isDebit?'Debit':'Credit'} note ${r.data.note_no} created`}); setModal(null); setNoteForm({client_id:'',amount:'',reason:''}); load('documents'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const createTravelClaim = async () => {
+    const lines = claimForm.lines.filter(l=>l.description&&l.amount).map(l=>({...l,amount:parseFloat(l.amount)}));
+    if(!claimForm.employee_id||!claimForm.trip_purpose||!claimForm.from_date||!claimForm.to_date||!lines.length) return;
+    const r = await api.post('/api/finance',{action:'create_travel_claim',...claimForm,lines});
+    if(r?.success){ setMsg({type:'success',text:`Travel claim ${r.data.claim_no} created`}); setModal(null); setClaimForm({employee_id:'',trip_purpose:'',destination:'',from_date:'',to_date:'',lines:[{date:'',description:'',amount:''}]}); load('documents'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const approveTravelClaim = async (claim_id) => {
+    const r = await api.post('/api/finance',{action:'approve_travel_claim',claim_id});
+    if(r?.success) load('documents'); else setMsg({type:'error',text:r?.error});
+  };
   const retireImprest = async () => {
     if(!retireForm.id||!retireForm.amount_accounted||!retireForm.receipt_path){ setMsg({type:'error',text:'Receipt reference and amount are required (FIN-012A)'}); return; }
     const r=await api.put('/api/finance',{action:'account_imprest',id:retireForm.id,amount_accounted:parseFloat(retireForm.amount_accounted),receipt_path:retireForm.receipt_path});
@@ -645,7 +723,7 @@ function Finance({ api }) {
   const loadRemit = async (p) => { setRemitPeriod(p); const r=await api.get(`/api/finance?section=remittance&period=${p}`); if(r?.success)setRemittance(r.data); };
   const loadP9 = async (emp) => { setP9Emp(emp); if(!emp){setP9(null);return;} const r=await api.get(`/api/finance?section=p9&employee_id=${emp}&year=2026`); if(r?.success)setP9(r.data); };
 
-  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'},{id:'templates',label:'Document Templates'}];
+  const tabs=[{id:'imprest',label:'Imprest Tracker'},{id:'documents',label:'Documents'},{id:'payroll',label:'Payroll'},{id:'gl',label:'Chart of Accounts'},{id:'journals',label:'Journals'},{id:'monthend',label:'Month-End & P&L'},{id:'budgets',label:'Budgets'},{id:'payments',label:'Payments (AP)'},{id:'treasury',label:'Treasury & Statutory'},{id:'payauth',label:'Payment Authority'}];
   const payAuthMatrix=[['Staff','≤ Kshs 5,000','Line Manager','Petty Cash'],['Dept Head','≤ Kshs 20,000','Finance Manager','Petty Cash / Transfer'],['Finance Manager','≤ Kshs 100,000','CFO','Bank Transfer'],['CFO','≤ Kshs 500,000','MD','Bank Transfer + Board Note'],['MD','> Kshs 500,000','Board','Board Resolution Required']];
 
   return (
@@ -654,18 +732,115 @@ function Finance({ api }) {
       <Tabs tabs={tabs} active={tab} setActive={t=>{setTab(t);load(t);}}/>
       {loading&&<Loading/>}
 
-      {!loading&&tab==='templates'&&(
+      {!loading&&tab==='documents'&&(
         <>
-          <SectionHeader title="Finance Document Templates" sub="Standard QSL documents — open to view or print"/>
-          <Alert type="info">These are the controlled output documents for finance and sales workflows (invoices, notes, statements, imprest, travel claims and payslips).</Alert>
-          <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Document','Use','']}
-              rows={FIN_DOCUMENTS.map(d=>[
-                <strong style={{fontSize:12,color:T.navy}}>{d.name}</strong>,
-                <span style={{fontSize:11,color:T.mgrey}}>{d.ref}</span>,
-                <Btn size="sm" variant="ghost" onClick={()=>window.open(`/templates/finance/${d.file}`,'_blank','noopener')}>View / Print</Btn>,
-              ])}/>
-          </Card>
+          <Tabs tabs={[{id:'quotes',label:'Quotations'},{id:'debit_notes',label:'Debit Notes'},{id:'credit_notes',label:'Credit Notes'},{id:'travel_claims',label:'Travel Claims'}]} active={docTab} setActive={setDocTab}/>
+
+          {docTab==='quotes'&&(<>
+            <SectionHeader title="Quotations" action={<Btn onClick={()=>setModal('quote')}>+ New Quote</Btn>}/>
+            <Card style={{padding:0,overflow:'hidden'}}>
+              <DataTable headers={['Quote No','Client','Subtotal','VAT','Total','Status','Date','']}
+                rows={quotes.map(q=>[
+                  <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{q.quote_no}</span>,
+                  q.client_name, fmt.kes(q.subtotal), fmt.kes(q.vat_amount),
+                  <strong>{fmt.kes(q.total)}</strong>,
+                  <Badge variant={q.status==='accepted'?'green':'amber'}>{q.status}</Badge>,
+                  fmt.date(q.created_at),
+                  <DocPdfButton api={api} url={`/api/finance?section=quote_pdf&id=${q.id}`}/>,
+                ])}
+              />
+            </Card>
+          </>)}
+
+          {docTab==='debit_notes'&&(<>
+            <SectionHeader title="Debit Notes" action={<Btn onClick={()=>setModal('debit_note')}>+ New Debit Note</Btn>}/>
+            <Card style={{padding:0,overflow:'hidden'}}>
+              <DataTable headers={['Note No','Client','Amount','Reason','Date','']}
+                rows={debitNotes.map(n=>[
+                  <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{n.note_no}</span>,
+                  n.client_name, <strong style={{color:T.red}}>{fmt.kes(n.amount)}</strong>,
+                  <span style={{fontSize:12}}>{n.reason}</span>, fmt.date(n.date),
+                  <DocPdfButton api={api} url={`/api/finance?section=debit_note_pdf&id=${n.id}`}/>,
+                ])}
+              />
+            </Card>
+          </>)}
+
+          {docTab==='credit_notes'&&(<>
+            <SectionHeader title="Credit Notes" action={<Btn onClick={()=>setModal('credit_note')}>+ New Credit Note</Btn>}/>
+            <Card style={{padding:0,overflow:'hidden'}}>
+              <DataTable headers={['Note No','Client','Amount','Reason','Date','']}
+                rows={creditNotes.map(n=>[
+                  <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{n.note_no}</span>,
+                  n.client_name, <strong style={{color:T.green}}>{fmt.kes(n.amount)}</strong>,
+                  <span style={{fontSize:12}}>{n.reason}</span>, fmt.date(n.date),
+                  <DocPdfButton api={api} url={`/api/finance?section=credit_note_pdf&id=${n.id}`}/>,
+                ])}
+              />
+            </Card>
+          </>)}
+
+          {docTab==='travel_claims'&&(<>
+            <SectionHeader title="Travel Claims" action={<Btn onClick={()=>setModal('travel_claim')}>+ New Claim</Btn>}/>
+            <Card style={{padding:0,overflow:'hidden'}}>
+              <DataTable headers={['Claim No','Employee','Purpose','Total','Status','Action','']}
+                rows={travelClaims.map(t=>[
+                  <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{t.claim_no}</span>,
+                  t.employee_name, <span style={{fontSize:12}}>{t.trip_purpose}</span>,
+                  <strong>{fmt.kes(t.total_amount)}</strong>,
+                  <Badge variant={t.status==='approved'?'green':'amber'}>{t.status}</Badge>,
+                  t.status==='pending'?<Btn size="sm" onClick={()=>approveTravelClaim(t.id)}>Approve</Btn>:'—',
+                  <DocPdfButton api={api} url={`/api/finance?section=travel_claim_pdf&id=${t.id}`}/>,
+                ])}
+              />
+            </Card>
+          </>)}
+
+          {modal==='quote'&&(
+            <Modal title="New Quotation" onClose={()=>setModal(null)} width={560}>
+              <Select label="Client" value={quoteForm.client_id} onChange={v=>setQuoteForm({...quoteForm,client_id:v})} required options={[{value:'',label:'Select…'},...clientsList.map(c=>({value:c.id,label:c.name}))]}/>
+              <Input label="Valid Until" value={quoteForm.valid_until} onChange={v=>setQuoteForm({...quoteForm,valid_until:v})} type="date"/>
+              {quoteForm.lines.map((l,idx)=>(
+                <div key={idx} style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:8,marginBottom:6}}>
+                  <Input label="Description" value={l.description} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,description:v};setQuoteForm({...quoteForm,lines:ls});}}/>
+                  <Input label="Qty" value={l.quantity} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,quantity:v};setQuoteForm({...quoteForm,lines:ls});}} type="number"/>
+                  <Input label="Unit Price" value={l.unit_price} onChange={v=>{const ls=[...quoteForm.lines];ls[idx]={...l,unit_price:v};setQuoteForm({...quoteForm,lines:ls});}} type="number"/>
+                </div>
+              ))}
+              <Btn size="sm" variant="ghost" onClick={()=>setQuoteForm({...quoteForm,lines:[...quoteForm.lines,{description:'',quantity:1,unit_price:''}]})}>+ Add Line</Btn>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createQuote} disabled={!quoteForm.client_id}>Create Quote</Btn></div>
+            </Modal>
+          )}
+
+          {(modal==='debit_note'||modal==='credit_note')&&(
+            <Modal title={modal==='debit_note'?'New Debit Note':'New Credit Note'} onClose={()=>setModal(null)}>
+              <Select label="Client" value={noteForm.client_id} onChange={v=>setNoteForm({...noteForm,client_id:v})} required options={[{value:'',label:'Select…'},...clientsList.map(c=>({value:c.id,label:c.name}))]}/>
+              <Input label="Amount (Kshs)" value={noteForm.amount} onChange={v=>setNoteForm({...noteForm,amount:v})} type="number" required/>
+              <Input label="Reason" value={noteForm.reason} onChange={v=>setNoteForm({...noteForm,reason:v})} required/>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={()=>createNote(modal==='debit_note')} disabled={!noteForm.client_id||!noteForm.amount||!noteForm.reason}>Create</Btn></div>
+            </Modal>
+          )}
+
+          {modal==='travel_claim'&&(
+            <Modal title="New Travel Claim" onClose={()=>setModal(null)} width={560}>
+              <Select label="Employee" value={claimForm.employee_id} onChange={v=>setClaimForm({...claimForm,employee_id:v})} required options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>
+              <Input label="Trip Purpose" value={claimForm.trip_purpose} onChange={v=>setClaimForm({...claimForm,trip_purpose:v})} required/>
+              <Input label="Destination" value={claimForm.destination} onChange={v=>setClaimForm({...claimForm,destination:v})}/>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                <Input label="From Date" value={claimForm.from_date} onChange={v=>setClaimForm({...claimForm,from_date:v})} type="date" required/>
+                <Input label="To Date" value={claimForm.to_date} onChange={v=>setClaimForm({...claimForm,to_date:v})} type="date" required/>
+              </div>
+              {claimForm.lines.map((l,idx)=>(
+                <div key={idx} style={{display:'grid',gridTemplateColumns:'1fr 2fr 1fr',gap:8,marginBottom:6}}>
+                  <Input label="Date" value={l.date} onChange={v=>{const ls=[...claimForm.lines];ls[idx]={...l,date:v};setClaimForm({...claimForm,lines:ls});}} type="date"/>
+                  <Input label="Description" value={l.description} onChange={v=>{const ls=[...claimForm.lines];ls[idx]={...l,description:v};setClaimForm({...claimForm,lines:ls});}}/>
+                  <Input label="Amount" value={l.amount} onChange={v=>{const ls=[...claimForm.lines];ls[idx]={...l,amount:v};setClaimForm({...claimForm,lines:ls});}} type="number"/>
+                </div>
+              ))}
+              <Btn size="sm" variant="ghost" onClick={()=>setClaimForm({...claimForm,lines:[...claimForm.lines,{date:'',description:'',amount:''}]})}>+ Add Expense Line</Btn>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createTravelClaim} disabled={!claimForm.employee_id||!claimForm.trip_purpose}>Submit Claim</Btn></div>
+            </Modal>
+          )}
         </>
       )}
 
@@ -675,7 +850,7 @@ function Finance({ api }) {
           <SectionHeader title="Imprest Register" sub={`${imprest.filter(i=>i.status==='OVERDUE').length} overdue · ${imprest.filter(i=>i.status==='CONVERTED').length} converted`}
             action={<div style={{display:'flex',gap:8}}><Btn size="sm" variant="ghost" onClick={checkOverdue}>Check Overdue</Btn><Btn onClick={()=>setModal('imprest')}>+ Request Imprest</Btn></div>}/>
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Ref No','Employee','Purpose','Amount','Due Date','Status','Workflow']}
+            <DataTable headers={['Ref No','Employee','Purpose','Amount','Due Date','Status','Workflow','']}
               rows={imprest.map(i=>[
                 <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{i.ref_no}</span>,
                 <strong>{i.employee_name}</strong>,
@@ -688,6 +863,7 @@ function Finance({ api }) {
                 :i.status==='released'?<Btn size="sm" onClick={()=>{setRetireForm({id:i.id,amount_accounted:String(i.amount),receipt_path:''});setModal('retire');}}>Retire</Btn>
                 :(i.status==='accounted'&&i.spot_check)?<div style={{display:'flex',gap:4}}><Btn size="sm" variant="ghost" onClick={()=>impAction('verify_receipt',i.id)}>Verify</Btn><Btn size="sm" variant="danger" onClick={()=>impAction('flag_false_receipt',i.id,{reason:'Spot-check failed'})}>False</Btn></div>
                 :'—',
+                <DocPdfButton api={api} url={`/api/finance?section=imprest_pdf&id=${i.id}`}/>,
               ])}
             />
           </Card>
@@ -1667,12 +1843,31 @@ function HR({ api }) {
   const [attPeriod,setAttPeriod]=useState('2026-06');
   const [gpsTrail,setGpsTrail]=useState(null);
   const [gpsEmp,setGpsEmp]=useState('');
+  const [leaveRequests,setLeaveRequests]=useState([]);
+  // CPD & Monthly Appraisals
+  const [cpdSummary,setCpdSummary]=useState([]);
+  const [cpdPlatforms,setCpdPlatforms]=useState([]);
+  const [cpdForm,setCpdForm]=useState({employee_id:'',platform_id:'',activity:'',provider:'',points:'',date_completed:'',verification_url:''});
+  const [appraisalQueue,setAppraisalQueue]=useState({pending_hr_review:[],active_warnings:[]});
+  const [appraisalForReview,setAppraisalForReview]=useState([]);
+  const [reviewScores,setReviewScores]=useState({});
+  const [cpdLogDetail,setCpdLogDetail]=useState(null);
 
   const load = async (t=tab) => {
     setLoading(true);
     if(t==='employees') { const r=await api.get('/api/hr?section=employees'); if(r?.success) setEmployees(r.data); }
     if(t==='attendance') { const r=await api.get('/api/hr?section=attendance'); if(r?.success) setAttendance(r.data); }
     if(t==='kpi') { const r=await api.get('/api/hr?section=kpi_summary'); if(r?.success) setKpi(r.data); }
+    if(t==='leave') { const r=await api.get('/api/hr?section=leave_requests'); if(r?.success) setLeaveRequests(r.data); }
+    if(t==='cpd') {
+      const [sum,plat]=await Promise.all([api.get('/api/hr?section=cpd_summary'),api.get('/api/hr?section=cpd_platforms')]);
+      if(sum?.success)setCpdSummary(sum.data); if(plat?.success)setCpdPlatforms(plat.data);
+      if(employees.length===0){ const r=await api.get('/api/hr?section=employees'); if(r?.success)setEmployees(r.data); }
+    }
+    if(t==='appraisals') {
+      const [q,rv]=await Promise.all([api.get('/api/hr?section=appraisals_hr_queue'),api.get('/api/hr?section=appraisals_for_review')]);
+      if(q?.success)setAppraisalQueue(q.data); if(rv?.success)setAppraisalForReview(rv.data);
+    }
     if(t==='people') {
       const [inc,dis,ld]=await Promise.all([api.get('/api/hr?section=increments'),api.get('/api/hr?section=disciplinary'),api.get('/api/hr?section=ld_compliance')]);
       if(inc?.success)setIncrements(inc.data); if(dis?.success)setDisciplinary(dis.data); if(ld?.success)setLdComp(ld.data);
@@ -1682,6 +1877,46 @@ function HR({ api }) {
   };
 
   useEffect(()=>{ load(); },[tab]);
+
+  const approveLeave = async (request_id, approved) => {
+    const r = await api.post('/api/hr', { action:'approve_leave', request_id, approved });
+    if (r?.success) load('leave');
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const logCpd = async () => {
+    if(!cpdForm.employee_id||!cpdForm.activity||!cpdForm.points) return;
+    const r = await api.post('/api/hr', { action:'log_cpd', ...cpdForm, points:parseFloat(cpdForm.points) });
+    if(r?.success){ setMsg({type:'success',text:`${r.data.points_added} CPD point(s) logged`}); setModal(null); setCpdForm({employee_id:'',platform_id:'',activity:'',provider:'',points:'',date_completed:'',verification_url:''}); load('cpd'); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const viewCpdLog = async (employee_id) => {
+    const r = await api.get(`/api/hr?section=cpd_log&employee_id=${employee_id}`);
+    if(r?.success) setCpdLogDetail(r.data);
+  };
+
+  const reviewManager = async (appraisal_id) => {
+    const sc = reviewScores[appraisal_id];
+    if(!sc?.score) return;
+    const r = await api.post('/api/hr', { action:'manager_review_appraisal', appraisal_id, manager_score:parseFloat(sc.score), manager_comments:sc.comments||'' });
+    if(r?.success) load('appraisals'); else setMsg({type:'error',text:r?.error});
+  };
+
+  const reviewHr = async (appraisal_id) => {
+    const r = await api.post('/api/hr', { action:'hr_review_appraisal', appraisal_id, hr_comments:reviewScores[appraisal_id]?.hrComments||'' });
+    if(r?.success){
+      if(r.data.escalation){
+        setMsg({type:'error',text:`Escalated to ${r.data.escalation.level.replace('_',' ').toUpperCase()} (${r.data.escalation.streak} consecutive low-scoring month(s))`});
+      } else setMsg({type:'success',text:'Appraisal reviewed'});
+      load('appraisals');
+    } else setMsg({type:'error',text:r?.error});
+  };
+
+  const resolveWarning = async (warning_id) => {
+    const r = await api.post('/api/hr', { action:'resolve_warning', warning_id });
+    if(r?.success) load('appraisals'); else setMsg({type:'error',text:r?.error});
+  };
 
   const createEmployee = async () => {
     if(!form.first_name||!form.last_name||!form.email||!form.department) return;
@@ -1712,7 +1947,7 @@ function HR({ api }) {
   return (
     <div>
       {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
-      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'},{id:'payroll_inputs',label:'Payroll Inputs'},{id:'people',label:'Increments & Discipline'}]} active={tab} setActive={t=>{setTab(t);}}/>
+      <Tabs tabs={[{id:'employees',label:'Employees'},{id:'attendance',label:'Attendance'},{id:'leave',label:'Leave'},{id:'kpi',label:'KPI Scorecards'},{id:'cpd',label:'CPD'},{id:'appraisals',label:'Appraisals'},{id:'payroll_inputs',label:'Payroll Inputs'},{id:'people',label:'Increments & Discipline'}]} active={tab} setActive={t=>{setTab(t);}}/>
       {loading&&<Loading/>}
 
       {!loading&&tab==='people'&&(<>
@@ -1854,10 +2089,127 @@ function HR({ api }) {
       )}
 
       {!loading&&tab==='leave'&&(
-        <Card><Alert type="info">Leave requests, approvals, and balance tracking. Annual entitlement: 21 days.</Alert>
-          <p style={{color:T.mgrey,fontSize:13,textAlign:'center',padding:20}}>Leave management table — submit and approve requests via API (POST /api/hr with action: request_leave | approve_leave)</p>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <Alert type="info">Leave requests, approvals, and balance tracking. Annual entitlement: 21 days.</Alert>
+          <DataTable headers={['Employee','Type','From','To','Days','Reason','Status','']}
+            rows={leaveRequests.map(r=>[
+              r.employee_name,
+              <span style={{textTransform:'capitalize'}}>{r.leave_type}</span>,
+              fmt.date(r.start_date),
+              fmt.date(r.end_date),
+              r.days,
+              <span style={{fontSize:12}}>{r.reason}</span>,
+              <Badge variant={r.status==='approved'?'green':r.status==='rejected'?'red':'amber'}>{r.status}</Badge>,
+              <div style={{display:'flex',gap:6}}>
+                {r.status==='pending'&&<>
+                  <Btn size="sm" onClick={()=>approveLeave(r.id,true)}>Approve</Btn>
+                  <Btn size="sm" variant="ghost" onClick={()=>approveLeave(r.id,false)}>Reject</Btn>
+                </>}
+                <DocPdfButton api={api} url={`/api/hr?section=leave_pdf&id=${r.id}`}/>
+              </div>,
+            ])}
+          />
         </Card>
       )}
+
+      {!loading&&tab==='cpd'&&(<>
+        <SectionHeader title="Continuous Professional Development" sub="Recommended learning platforms and per-employee CPD point tracking" action={<Btn onClick={()=>setModal('cpd')}>+ Log CPD Activity</Btn>}/>
+        <Card style={{marginBottom:16}}>
+          <SectionHeader title="Recommended CPD Platforms" sub="Staff are encouraged to use these to meet their annual points target"/>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:10}}>
+            {cpdPlatforms.map(p=>(
+              <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" style={{display:'block',padding:'12px 14px',border:`1px solid ${T.lgrey}`,borderRadius:8,textDecoration:'none'}}>
+                <div style={{fontWeight:700,fontSize:13,color:T.navy}}>{p.name} ↗</div>
+                <div style={{fontSize:11,color:T.mgrey,marginTop:3}}>{p.description}</div>
+              </a>
+            ))}
+          </div>
+        </Card>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Employee','Department','Manager','CPD Points','Target','Attainment']}
+            rows={cpdSummary.map(c=>[
+              <button onClick={()=>viewCpdLog(c.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0,color:T.blue,textDecoration:'underline',fontSize:13}}>{c.name}</button>,
+              c.department, c.manager_name||'—',
+              <strong>{(c.cpd_points||0).toFixed(1)}</strong>,
+              c.cpd_target,
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <div style={{width:80,height:6,background:T.lgrey,borderRadius:3,overflow:'hidden'}}>
+                  <div style={{width:`${Math.min(100,(c.attainment||0)*100)}%`,height:'100%',background:c.below_target?T.amber:T.green}}/>
+                </div>
+                <Badge variant={c.below_target?'amber':'green'}>{Math.round((c.attainment||0)*100)}%</Badge>
+              </div>,
+            ])}
+          />
+        </Card>
+        {cpdLogDetail&&(
+          <Modal title={`CPD Log — ${cpdLogDetail.employee.first_name} ${cpdLogDetail.employee.last_name}`} onClose={()=>setCpdLogDetail(null)} width={620}>
+            <DataTable headers={['Date','Activity','Provider','Points','']} empty="No CPD activity logged yet."
+              rows={cpdLogDetail.logs.map(l=>[
+                fmt.date(l.date_completed), l.activity, l.provider||l.platform_name||'—', l.points,
+                l.verification_url?<a href={l.verification_url} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:T.blue}}>✓ Verify</a>:<span style={{fontSize:11,color:T.mgrey}}>No link</span>,
+              ])}
+            />
+          </Modal>
+        )}
+        {modal==='cpd'&&(
+          <Modal title="Log CPD Activity" onClose={()=>setModal(null)}>
+            <Select label="Employee" value={cpdForm.employee_id} onChange={v=>setCpdForm({...cpdForm,employee_id:v})} required options={[{value:'',label:'Select…'},...employees.map(e=>({value:e.id,label:`${e.first_name} ${e.last_name}`}))]}/>
+            <Select label="Platform" value={cpdForm.platform_id} onChange={v=>setCpdForm({...cpdForm,platform_id:v})} options={[{value:'',label:'Other / not listed'},...cpdPlatforms.map(p=>({value:p.id,label:p.name}))]}/>
+            <Input label="Activity / Course Title" value={cpdForm.activity} onChange={v=>setCpdForm({...cpdForm,activity:v})} required/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+              <Input label="Provider" value={cpdForm.provider} onChange={v=>setCpdForm({...cpdForm,provider:v})}/>
+              <Input label="Points" value={cpdForm.points} onChange={v=>setCpdForm({...cpdForm,points:v})} type="number" required/>
+            </div>
+            <Input label="Date Completed" value={cpdForm.date_completed} onChange={v=>setCpdForm({...cpdForm,date_completed:v})} type="date"/>
+            <Input label="Verification Link" value={cpdForm.verification_url} onChange={v=>setCpdForm({...cpdForm,verification_url:v})} placeholder="e.g. Alison Learner Achievement Verification URL, Coursera Verify Certificate link" note="Most free platforms issue a public link to verify the certificate is genuine — paste it here so HR/managers can check it."/>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={logCpd} disabled={!cpdForm.employee_id||!cpdForm.activity||!cpdForm.points}>Log Activity</Btn></div>
+          </Modal>
+        )}
+      </>)}
+
+      {!loading&&tab==='appraisals'&&(<>
+        {appraisalForReview.length>0&&(
+          <>
+            <SectionHeader title="My Team — Appraisals Awaiting My Review" sub="Direct reports who submitted their monthly self-appraisal"/>
+            <Card style={{padding:0,overflow:'hidden',marginBottom:20}}>
+              <DataTable headers={['Employee','Period','Self-Score','Achievements','Score','']}
+                rows={appraisalForReview.map(a=>[
+                  a.employee_name, a.period, a.self_score??'—',
+                  <span style={{fontSize:12}}>{(a.achievements||'').slice(0,80)}{a.achievements?.length>80?'…':''}</span>,
+                  <input type="number" min="0" max="100" placeholder="0-100" value={reviewScores[a.id]?.score||''} onChange={e=>setReviewScores({...reviewScores,[a.id]:{...reviewScores[a.id],score:e.target.value}})} style={{width:70,padding:'5px 8px',border:`1px solid ${T.lgrey}`,borderRadius:5,fontSize:12}}/>,
+                  <Btn size="sm" onClick={()=>reviewManager(a.id)} disabled={!reviewScores[a.id]?.score}>Submit Score</Btn>,
+                ])}
+              />
+            </Card>
+          </>
+        )}
+
+        <SectionHeader title="HR Review Queue" sub="Manager-scored appraisals awaiting HR sign-off"/>
+        <Card style={{padding:0,overflow:'hidden',marginBottom:20}}>
+          <DataTable headers={['Employee','Period','Manager','Manager Score','Status','']} empty="Nothing awaiting HR review."
+            rows={appraisalQueue.pending_hr_review.map(a=>[
+              a.employee_name, a.period, a.manager_name||'—',
+              <strong style={{color:a.manager_score<50?T.red:T.green}}>{a.manager_score}</strong>,
+              <Badge variant="amber">{a.status}</Badge>,
+              <Btn size="sm" onClick={()=>reviewHr(a.id)}>Review & Close</Btn>,
+            ])}
+          />
+        </Card>
+
+        <SectionHeader title="Active Performance Warnings" sub="Consecutive low-scoring months — escalates warning → final warning → termination review"/>
+        <Card style={{padding:0,overflow:'hidden'}}>
+          <DataTable headers={['Employee','Level','Reason','Triggered','Issued','']} empty="No active warnings."
+            rows={appraisalQueue.active_warnings.map(w=>[
+              w.employee_name,
+              <Badge variant={w.level==='termination_review'?'red':w.level==='final_warning'?'amber':'blue'}>{w.level.replace('_',' ')}</Badge>,
+              <span style={{fontSize:12}}>{w.reason}</span>,
+              w.trigger_period,
+              fmt.date(w.issued_at),
+              <Btn size="sm" variant="ghost" onClick={()=>resolveWarning(w.id)}>Resolve</Btn>,
+            ])}
+          />
+        </Card>
+      </>)}
 
       {modal==='emp'&&(
         <Modal title="Add New Employee" onClose={()=>setModal(null)}>
@@ -1965,7 +2317,7 @@ function Procurement({ api }) {
           <Alert type="info"><strong>PROC-003:</strong> ≤Kshs 50K = 1 quote · Kshs 50K–500K = 3 quotes · &gt;Kshs 500K = formal tender (cannot raise as PR).</Alert>
           <SectionHeader title="Purchase Requisitions" action={<Btn onClick={()=>setModal('pr')}>+ New PR</Btn>}/>
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['PR No','Description','Dept','Amount','Quotations','Status','Date']}
+            <DataTable headers={['PR No','Description','Dept','Amount','Quotations','Status','Date','']}
               rows={prs.map(p=>[
                 <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{p.pr_no}</span>,
                 <span style={{fontSize:12}}>{p.description}</span>,
@@ -1974,6 +2326,7 @@ function Procurement({ api }) {
                 <span style={{fontSize:11,fontWeight:700,color:quoteColor(p.amount)}}>{quoteTier(p.amount)}</span>,
                 <Badge variant={p.status==='approved'?'green':p.status?.includes('pending')?'amber':'blue'}>{p.status}</Badge>,
                 fmt.date(p.date),
+                <DocPdfButton api={api} url={`/api/procurement?section=pr_pdf&id=${p.id}`}/>,
               ])}
             />
           </Card>
@@ -1982,7 +2335,7 @@ function Procurement({ api }) {
 
       {!loading&&tab==='lpos'&&(
         <Card style={{padding:0,overflow:'hidden'}}>
-          <DataTable headers={['LPO No','Supplier','Total','VAT','Grand Total','Delivery','Status']}
+          <DataTable headers={['LPO No','Supplier','Total','VAT','Grand Total','Delivery','Status','']}
             rows={lpos.map(l=>[
               <strong style={{fontFamily:'monospace',fontSize:11}}>{l.lpo_no}</strong>,
               l.supplier_name,
@@ -1991,6 +2344,7 @@ function Procurement({ api }) {
               <strong>{fmt.kes(l.grand_total)}</strong>,
               fmt.date(l.delivery_date),
               <Badge variant={l.status==='delivered'?'green':l.status==='issued'?'blue':'amber'}>{l.status}</Badge>,
+              <DocPdfButton api={api} url={`/api/procurement?section=lpo_pdf&id=${l.id}`}/>,
             ])}
           />
         </Card>
@@ -2000,7 +2354,7 @@ function Procurement({ api }) {
         <>
           <Alert type="warning"><strong>STK-020/021/024B:</strong> Stage 1 physical inspection + photo upload BEFORE Stage 2 system GRN. System enforces this — no bypass.</Alert>
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['GRN No','LPO','Supplier','Date','Stage 1','Photo','Stage 2','Status']}
+            <DataTable headers={['GRN No','LPO','Supplier','Date','Stage 1','Photo','Stage 2','Status','']}
               rows={grns.map(g=>[
                 <strong style={{fontFamily:'monospace',fontSize:11}}>{g.grn_no}</strong>,
                 g.lpo_no,
@@ -2010,6 +2364,7 @@ function Procurement({ api }) {
                 g.photo_paths&&g.photo_paths!=='[]'?<Badge variant="green">✅ Uploaded</Badge>:<Badge variant="red">Missing</Badge>,
                 g.stage2_done?<Badge variant="green">✅ Done</Badge>:<Badge variant="default">Awaiting</Badge>,
                 <Badge variant={g.status==='complete'?'green':'amber'}>{g.status}</Badge>,
+                <DocPdfButton api={api} url={`/api/procurement?section=grn_pdf&id=${g.id}`}/>,
               ])}
             />
           </Card>
@@ -2944,7 +3299,7 @@ function CRMModule({ api }) {
     setSigning(true);
     const r=await api.post('/api/crm',{action:'sign_transfer',transfer_id:txId,signer_role:role,signature_key:`QSL-DS-SIG-${Date.now()}`});
     setSigning(false);
-    if(r?.success){if(r.data.complete){setTxModal(null);setTxStep(0);setSelected(null);setMsg({type:'success',text:'Client ownership transferred successfully — both digital signatures applied.'});load('clients');}else setTxStep(2);}
+    if(r?.success){if(r.data.complete){setTxModal(null);setTxStep(0);setSelected(null);setMsg({type:'success',text:'Client ownership transferred successfully — both digital signatures applied.',transferId:txId});load('clients');}else setTxStep(2);}
     else setMsg({type:'error',text:r?.error});
   };
 
@@ -2977,9 +3332,10 @@ function CRMModule({ api }) {
         <SectionHeader title="Interaction History" sub="CRM-030: All touchpoints logged"/>
         {(detail.interactions||[]).length===0?<p style={{color:T.mgrey,fontSize:13,padding:'20px 0',textAlign:'center'}}>No interactions yet.</p>:(
           detail.interactions.map((i,idx)=>(
-            <div key={idx} style={{display:'flex',gap:12,padding:'9px 0',borderBottom:`1px solid ${T.lgrey}`}}>
+            <div key={idx} style={{display:'flex',gap:12,padding:'9px 0',borderBottom:`1px solid ${T.lgrey}`,alignItems:'center'}}>
               <Badge variant={i.type==='Call'?'blue':i.type==='Email'?'amber':'green'}>{i.type}</Badge>
               <div style={{flex:1}}><div style={{fontSize:12}}>{i.summary}</div><div style={{fontSize:11,color:T.mgrey}}>{fmt.date(i.date)} · {i.done_by_name}</div></div>
+              <DocPdfButton api={api} label="Visit Report" url={`/api/crm?section=visit_pdf&id=${i.id}`}/>
             </div>
           ))
         )}
@@ -3008,7 +3364,7 @@ function CRMModule({ api }) {
   }
 
   return(<div>
-    {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
+    {msg&&<Alert type={msg.type}>{msg.text} {msg.transferId&&<DocPdfButton api={api} label="Download Transfer Doc" url={`/api/crm?section=transfer_pdf&id=${msg.transferId}`}/>}</Alert>}
     <Tabs tabs={[{id:'clients',label:'Client Register'},{id:'leads',label:'Leads & Pipeline'},{id:'payments',label:'Payment Alerts'}]} active={tab} setActive={t=>setTab(t)}/>
     {loading&&<Loading/>}
     {!loading&&tab==='clients'&&(<>
@@ -3020,7 +3376,7 @@ function CRMModule({ api }) {
         <Stat label="Cleared" value={clients.filter(c=>!c.outstanding).length} icon="✅" variant="green"/>
       </div>
       <Card style={{padding:0,overflow:'hidden'}}>
-        <DataTable headers={['Client','Contact','Segment','Account Owner','Outstanding','Status','Action']}
+        <DataTable headers={['Client','Contact','Segment','Account Owner','Outstanding','Status','Documents','Action']}
           rows={clients.map(c=>[
             <button onClick={()=>loadDetail(c.id)} style={{background:'none',border:'none',cursor:'pointer',padding:0}}><strong style={{color:T.blue,textDecoration:'underline'}}>{c.name}</strong></button>,
             <div><div style={{fontSize:12}}>{c.contact_person}</div><div style={{fontSize:11,color:T.mgrey}}>{c.email}</div></div>,
@@ -3028,6 +3384,12 @@ function CRMModule({ api }) {
             <span style={{fontSize:12,fontWeight:600}}>{c.owner_name||'—'}</span>,
             <strong style={{color:(c.outstanding||0)>0?T.amber:T.green}}>{fmt.kes(c.outstanding||0)}</strong>,
             <Badge variant={(c.outstanding||0)>0?'amber':'green'}>{(c.outstanding||0)>0?'Outstanding':'Cleared'}</Badge>,
+            <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+              <DocPdfButton api={api} label="NDA" url={`/api/crm?section=nda_pdf&id=${c.id}`}/>
+              <DocPdfButton api={api} label="Contract" url={`/api/crm?section=contract_pdf&id=${c.id}`}/>
+              <DocPdfButton api={api} label="Onboarding" url={`/api/crm?section=onboarding_pdf&id=${c.id}`}/>
+              <DocPdfButton api={api} label="Statement" url={`/api/finance?section=statement_pdf&client_id=${c.id}`}/>
+            </div>,
             <Btn size="sm" variant="ghost" onClick={()=>loadDetail(c.id)}>View</Btn>,
           ])}
         />
@@ -3042,7 +3404,7 @@ function CRMModule({ api }) {
       </div>
       <SectionHeader title="Lead Register" action={<Btn onClick={()=>setModal('lead')}>+ New Lead</Btn>}/>
       <Card style={{padding:0,overflow:'hidden'}}>
-        <DataTable headers={['Ref','Company','Contact','Service','Value','Stage','Owner']}
+        <DataTable headers={['Ref','Company','Contact','Service','Value','Stage','Owner','']}
           rows={leads.map(l=>[
             <span style={{fontFamily:'monospace',fontSize:11,color:T.mgrey}}>{l.ref_no}</span>,
             <strong style={{fontSize:12}}>{l.company}</strong>,
@@ -3051,6 +3413,7 @@ function CRMModule({ api }) {
             <strong>{fmt.kes(l.estimated_value)}</strong>,
             <Badge variant="amber">{l.stage}</Badge>,
             l.owner_name?.split(' ')[0]||'—',
+            <DocPdfButton api={api} label="Capture Form" url={`/api/crm?section=lead_pdf&id=${l.id}`}/>,
           ])}
         />
       </Card>
@@ -3164,7 +3527,14 @@ function StoresModule({ api, user }) {
       </>)}
 
       {tab==='balances'&&(
-        loading?<Loading/>:(
+        loading?<Loading/>:(<>
+          {locations.length>0&&(
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>
+              {locations.map(l=>(
+                <DocPdfButton key={l.id} api={api} label={`Stock Take Sheet — ${l.name}`} url={`/api/stores?section=stock_take_pdf&location_id=${l.id}`}/>
+              ))}
+            </div>
+          )}
           <Card style={{padding:0,overflow:'hidden'}}>
             <DataTable headers={['Item','Location','Batch','Quantity','Updated']}
               rows={balances.map(b=>[
@@ -3175,7 +3545,7 @@ function StoresModule({ api, user }) {
               ])}
             />
           </Card>
-        )
+        </>)
       )}
 
       {tab==='transfers'&&(<>
@@ -3184,12 +3554,13 @@ function StoresModule({ api, user }) {
         </div>
         {loading?<Loading/>:(
           <Card style={{padding:0,overflow:'hidden'}}>
-            <DataTable headers={['Transfer No.','Item','Qty','From','To','Status','Action']}
+            <DataTable headers={['Transfer No.','Item','Qty','From','To','Status','Action','']}
               rows={transfers.map(t=>[
                 <span style={{fontFamily:'monospace',fontSize:11}}>{t.transfer_no}</span>,
                 t.item_name, t.quantity, t.from_location_name, t.to_location_name,
                 <Badge variant={t.status==='completed'?'green':t.status==='cancelled'?'red':'amber'}>{t.status}</Badge>,
                 t.status==='pending'?<Btn size="sm" onClick={()=>submitAction('approve_transfer',{id:t.id})}>Approve</Btn>:'—',
+                <DocPdfButton api={api} url={`/api/stores?section=transfer_pdf&id=${t.id}`}/>,
               ])}
             />
           </Card>
@@ -3571,6 +3942,130 @@ function HSE({ api }) {
   </div>);
 }
 
+// ── SOP LIBRARY MODULE ──────────────────────────────────────────────────────
+// Departmental Standard Operating Procedures with full revision history.
+// Every department's SOPs are listed with their current revision number and
+// last review date; "History" opens every earlier version (still
+// downloadable) for that document.
+const SOP_DEPARTMENTS = ['Technical','Commercial','Finance','HR','Procurement','Stores','Projects','HSE','Administration'];
+
+function SOPModule({ api, user }) {
+  const [sops,setSops]=useState([]);
+  const [loading,setLoading]=useState(false);
+  const [modal,setModal]=useState(null);
+  const [msg,setMsg]=useState(null);
+  const [deptFilter,setDeptFilter]=useState('');
+  const [form,setForm]=useState({code:'',title:'',department:'Technical',category:'',next_review_date:'',file_name:'',file_data:''});
+  const [revForm,setRevForm]=useState({sop_id:'',change_notes:'',next_review_date:'',file_name:'',file_data:''});
+  const [history,setHistory]=useState(null); // { sop, versions }
+
+  const load = async (dept=deptFilter) => {
+    setLoading(true);
+    const r = await api.get(`/api/sops?section=list${dept?`&department=${dept}`:''}`);
+    if(r?.success) setSops(r.data);
+    setLoading(false);
+  };
+  useEffect(()=>{ load(); }, [deptFilter]);
+
+  const readFile = (file, setTarget, target) => {
+    const reader = new FileReader();
+    reader.onload = () => setTarget({...target, file_name:file.name, file_data:reader.result});
+    reader.readAsDataURL(file);
+  };
+
+  const createSop = async () => {
+    if(!form.code||!form.title||!form.department) return;
+    const r = await api.post('/api/sops', {action:'create_sop', ...form});
+    if(r?.success){ setMsg({type:'success',text:`SOP ${r.data.code} created`}); setModal(null); setForm({code:'',title:'',department:'Technical',category:'',next_review_date:'',file_name:'',file_data:''}); load(); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const newRevision = async () => {
+    if(!revForm.sop_id) return;
+    const r = await api.post('/api/sops', {action:'new_revision', ...revForm});
+    if(r?.success){ setMsg({type:'success',text:`Revision ${r.data.version} recorded`}); setModal(null); setRevForm({sop_id:'',change_notes:'',next_review_date:'',file_name:'',file_data:''}); load(); }
+    else setMsg({type:'error',text:r?.error});
+  };
+
+  const viewHistory = async (sop) => {
+    const r = await api.get(`/api/sops?section=versions&sop_id=${sop.id}`);
+    if(r?.success) setHistory({ sop, versions: r.data });
+  };
+
+  return(<div>
+    {msg&&<Alert type={msg.type}>{msg.text}</Alert>}
+    <SectionHeader title="SOP Library" sub="Departmental procedures, current revision &amp; review history" action={<Btn onClick={()=>setModal('new_sop')}>+ New SOP</Btn>}/>
+    <div style={{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap'}}>
+      <Btn size="sm" variant={!deptFilter?'primary':'ghost'} onClick={()=>setDeptFilter('')}>All</Btn>
+      {SOP_DEPARTMENTS.map(d=><Btn key={d} size="sm" variant={deptFilter===d?'primary':'ghost'} onClick={()=>setDeptFilter(d)}>{d}</Btn>)}
+    </div>
+    {loading?<Loading/>:(
+      <Card style={{padding:0,overflow:'hidden'}}>
+        <DataTable headers={['Code','Title','Department','Category','Version','Last Reviewed','Next Review','Status','']} empty="No SOPs yet for this department."
+          rows={sops.map(s=>[
+            <span style={{fontFamily:'monospace',fontSize:11,color:T.navy}}>{s.code}</span>,
+            s.title,
+            <Badge variant="navy">{s.department}</Badge>,
+            s.category||'—',
+            <Badge variant="blue">v{s.current_version}</Badge>,
+            <div>{fmt.date(s.reviewed_at)}<div style={{fontSize:10,color:T.mgrey}}>{s.reviewed_by_name||'—'}</div></div>,
+            s.next_review_date?fmt.date(s.next_review_date):'—',
+            <Badge variant={s.status==='active'?'green':s.status==='withdrawn'?'red':'amber'}>{s.status}</Badge>,
+            <div style={{display:'flex',gap:4}}>
+              {s.file_url&&<Btn size="sm" variant="ghost" onClick={()=>window.open(s.file_url,'_blank')}>View</Btn>}
+              <Btn size="sm" variant="ghost" onClick={()=>viewHistory(s)}>History</Btn>
+              <Btn size="sm" onClick={()=>{setRevForm({...revForm,sop_id:s.id});setModal('new_revision');}}>+ Revision</Btn>
+            </div>,
+          ])}
+        />
+      </Card>
+    )}
+
+    {modal==='new_sop'&&(
+      <Modal title="New SOP" onClose={()=>setModal(null)} width={560}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="SOP Code" value={form.code} onChange={v=>setForm({...form,code:v})} required placeholder="e.g. QSL/QP/19"/>
+          <Select label="Department" value={form.department} onChange={v=>setForm({...form,department:v})} options={SOP_DEPARTMENTS.map(d=>({value:d,label:d}))}/>
+        </div>
+        <Input label="Title" value={form.title} onChange={v=>setForm({...form,title:v})} required/>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Category" value={form.category} onChange={v=>setForm({...form,category:v})} placeholder="e.g. Calibration, Safety"/>
+          <Input label="Next Review Date" value={form.next_review_date} onChange={v=>setForm({...form,next_review_date:v})} type="date"/>
+        </div>
+        <label style={{display:'block',fontSize:11,fontWeight:600,color:T.dgrey,margin:'10px 0 4px'}}>Document File (PDF/Word)</label>
+        <input type="file" accept=".pdf,.doc,.docx" onChange={e=>{const f=e.target.files?.[0]; if(f) readFile(f,setForm,form);}} style={{fontSize:12,display:'block',marginBottom:8}}/>
+        {form.file_name&&<div style={{fontSize:11,color:T.green,marginBottom:8}}>✓ {form.file_name}</div>}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={createSop} disabled={!form.code||!form.title}>Create SOP</Btn></div>
+      </Modal>
+    )}
+
+    {modal==='new_revision'&&(
+      <Modal title="Record New Revision" onClose={()=>setModal(null)} width={520}>
+        <Input label="Change Notes" value={revForm.change_notes} onChange={v=>setRevForm({...revForm,change_notes:v})} placeholder="What changed in this revision?"/>
+        <Input label="Next Review Date" value={revForm.next_review_date} onChange={v=>setRevForm({...revForm,next_review_date:v})} type="date"/>
+        <label style={{display:'block',fontSize:11,fontWeight:600,color:T.dgrey,margin:'10px 0 4px'}}>Updated Document File</label>
+        <input type="file" accept=".pdf,.doc,.docx" onChange={e=>{const f=e.target.files?.[0]; if(f) readFile(f,setRevForm,revForm);}} style={{fontSize:12,display:'block',marginBottom:8}}/>
+        {revForm.file_name&&<div style={{fontSize:11,color:T.green,marginBottom:8}}>✓ {revForm.file_name}</div>}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={newRevision}>Save Revision</Btn></div>
+      </Modal>
+    )}
+
+    {history&&(
+      <Modal title={`Version History — ${history.sop.code}`} onClose={()=>setHistory(null)} width={560}>
+        <DataTable headers={['Version','Uploaded By','Date','Notes','']}
+          rows={history.versions.map(v=>[
+            <Badge variant={v.is_current?'green':'default'}>v{v.version_no}{v.is_current?' (current)':''}</Badge>,
+            v.uploaded_by_name||'—',
+            fmt.date(v.uploaded_at),
+            <span style={{fontSize:11}}>{v.change_notes||'—'}</span>,
+            v.file_url?<Btn size="sm" variant="ghost" onClick={()=>window.open(v.file_url,'_blank')}>View</Btn>:'—',
+          ])}
+        />
+      </Modal>
+    )}
+  </div>);
+}
+
 // ── CALIBRATION MODULE ────────────────────────────────────────────────────────
 // ISO/IEC 17025 calibration method procedures (EURAMET / OIML) plus the
 // certificate output template. Served as static documents from public/templates.
@@ -3592,7 +4087,11 @@ function CalibrationModule({ api }) {
   const [loading,setLoading]=useState(false);
   const [modal,setModal]=useState(null);
   const [clients,setClients]=useState([]);
-  const [form,setForm]=useState({client_id:'',instrument:'',make:'',model:'',serial_no:'',range:'',uncertainty:'',ref_standard_id:'',next_cal_date:'',result:'pass'});
+  const [form,setForm]=useState({client_id:'',instrument:'',make:'',model:'',serial_no:'',range:'',uncertainty:'',ref_standard_id:'',next_cal_date:'',result:'pass',
+    instrument_type:'general',temp_c_end:'',humidity_pct_end:'',min_weight:'',
+    nawi_test_points:[{test_load:'',indication:'',error:'',uncertainty:''}],
+    nawi_repeatability:[{indication:''},{indication:''},{indication:''}],
+    nawi_eccentricity:[{position:'Centre',indication:'',deviation:''},{position:'Front-Left',indication:'',deviation:''},{position:'Rear-Left',indication:'',deviation:''},{position:'Rear-Right',indication:'',deviation:''},{position:'Front-Right',indication:'',deviation:''}]});
   const [msg,setMsg]=useState(null);
   const load=async(t=tab)=>{
     setLoading(true);
@@ -3603,7 +4102,17 @@ function CalibrationModule({ api }) {
   useEffect(()=>{load();api.get('/api/crm?section=clients').then(r=>{if(r?.success)setClients(r.data);});api.get('/api/calibration?section=reference_standards').then(r=>{if(r?.success)setStandards(r.data);});},[tab]);
   const issueCert=async()=>{
     if(!form.client_id||!form.instrument||!form.uncertainty)return;
-    const r=await api.post('/api/calibration',{action:'issue_cert',...form,calibrated_at:new Date().toISOString().split('T')[0]});
+    let payload = {...form, calibrated_at:new Date().toISOString().split('T')[0]};
+    if(form.instrument_type==='nawi'){
+      payload.nawi_test_points = form.nawi_test_points.filter(p=>p.test_load).map(p=>({...p,indication:parseFloat(p.indication)||null,error:parseFloat(p.error)||null,uncertainty:parseFloat(p.uncertainty)||null}));
+      payload.nawi_repeatability = form.nawi_repeatability.filter(r=>r.indication!=='').map(r=>({indication:parseFloat(r.indication)}));
+      payload.nawi_eccentricity = form.nawi_eccentricity.filter(e=>e.indication!=='').map(e=>({...e,indication:parseFloat(e.indication)||null,deviation:parseFloat(e.deviation)||null}));
+      if(payload.nawi_test_points.length<3){ setMsg({type:'error',text:'cg-18 requires at least 3 error-of-indication test loads for a NAWI certificate'}); return; }
+      if(payload.nawi_repeatability.length<3){ setMsg({type:'error',text:'cg-18 requires at least 3 repeatability readings for a NAWI certificate'}); return; }
+    } else {
+      delete payload.nawi_test_points; delete payload.nawi_repeatability; delete payload.nawi_eccentricity;
+    }
+    const r=await api.post('/api/calibration',{action:'issue_cert',...payload});
     if(r?.success){setMsg({type:'success',text:`Certificate ${r.data.cert_no} issued${r.data.signed?' — RSA-2048 digital signature applied':''}`});setModal(null);load('certificates');}
     else setMsg({type:'error',text:r?.error});
   };
@@ -3676,9 +4185,10 @@ function CalibrationModule({ api }) {
     {modal==='cert'&&(
       <Modal title="Issue Certificate — ISO 17025" onClose={()=>setModal(null)} width={580}>
         <Alert type="info">RSA-2048 digital signature auto-applied. Certificate number auto-generated.</Alert>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
           <Select label="Client" value={form.client_id} onChange={v=>setForm({...form,client_id:v})} required options={[{value:'',label:'Select client…'},...clients.map(c=>({value:c.id,label:c.name}))]}/>
           <Select label="Result" value={form.result} onChange={v=>setForm({...form,result:v})} options={[{value:'pass',label:'✅ Pass'},{value:'fail',label:'❌ Fail'}]}/>
+          <Select label="Instrument Type" value={form.instrument_type} onChange={v=>setForm({...form,instrument_type:v})} options={[{value:'general',label:'General'},{value:'nawi',label:'NAWI (Weighing — cg-18)'}]}/>
         </div>
         <Input label="Instrument" value={form.instrument} onChange={v=>setForm({...form,instrument:v})} required placeholder="Make, model, type"/>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
@@ -3694,6 +4204,49 @@ function CalibrationModule({ api }) {
           <Select label="Reference Standard" value={form.ref_standard_id} onChange={v=>setForm({...form,ref_standard_id:v})} options={[{value:'',label:'Select standard…'},...standards.map(r=>({value:r.id,label:r.name}))]}/>
           <Input label="Next Calibration Date" value={form.next_cal_date} onChange={v=>setForm({...form,next_cal_date:v})} type="date" required/>
         </div>
+
+        {form.instrument_type==='nawi'&&(<>
+          <Alert type="warning">EURAMET cg-18 §4: enter the actual error-of-indication test loads, eccentricity test, and repeatability readings — these are required for a NAWI certificate, not just a summary uncertainty.</Alert>
+
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:8}}>
+            <Input label="Temp at End of Test (°C)" value={form.temp_c_end} onChange={v=>setForm({...form,temp_c_end:v})} type="number"/>
+            <Input label="Humidity at End (%)" value={form.humidity_pct_end} onChange={v=>setForm({...form,humidity_pct_end:v})} type="number"/>
+          </div>
+          <Input label="Minimum Weight Result" value={form.min_weight} onChange={v=>setForm({...form,min_weight:v})} placeholder="e.g. 2.0 kg"/>
+
+          <div style={{fontWeight:700,fontSize:12,color:T.navy,margin:'12px 0 6px'}}>Error of Indication — Test Loads (≥3 required)</div>
+          {form.nawi_test_points.map((p,idx)=>(
+            <div key={idx} style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr auto',gap:6,marginBottom:4}}>
+              <Input label="" value={p.test_load} onChange={v=>{const ps=[...form.nawi_test_points];ps[idx]={...p,test_load:v};setForm({...form,nawi_test_points:ps});}} placeholder="e.g. 0.5 Max"/>
+              <Input label="" value={p.indication} onChange={v=>{const ps=[...form.nawi_test_points];ps[idx]={...p,indication:v};setForm({...form,nawi_test_points:ps});}} type="number" placeholder="Indication"/>
+              <Input label="" value={p.error} onChange={v=>{const ps=[...form.nawi_test_points];ps[idx]={...p,error:v};setForm({...form,nawi_test_points:ps});}} type="number" placeholder="Error"/>
+              <Input label="" value={p.uncertainty} onChange={v=>{const ps=[...form.nawi_test_points];ps[idx]={...p,uncertainty:v};setForm({...form,nawi_test_points:ps});}} type="number" placeholder="Uncertainty"/>
+              <Btn size="sm" variant="ghost" onClick={()=>setForm({...form,nawi_test_points:form.nawi_test_points.filter((_,i)=>i!==idx)})}>✕</Btn>
+            </div>
+          ))}
+          <Btn size="sm" variant="ghost" onClick={()=>setForm({...form,nawi_test_points:[...form.nawi_test_points,{test_load:'',indication:'',error:'',uncertainty:''}]})}>+ Add Test Load</Btn>
+
+          <div style={{fontWeight:700,fontSize:12,color:T.navy,margin:'14px 0 6px'}}>Repeatability Readings (≥3 required, same load)</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:4}}>
+            {form.nawi_repeatability.map((r,idx)=>(
+              <div key={idx} style={{display:'flex',alignItems:'center',gap:4}}>
+                <Input label="" value={r.indication} onChange={v=>{const rs=[...form.nawi_repeatability];rs[idx]={indication:v};setForm({...form,nawi_repeatability:rs});}} type="number" placeholder={`R${idx+1}`} style={{width:90}}/>
+                <span style={{cursor:'pointer',color:T.mgrey,fontSize:12}} onClick={()=>setForm({...form,nawi_repeatability:form.nawi_repeatability.filter((_,i)=>i!==idx)})}>✕</span>
+              </div>
+            ))}
+          </div>
+          <Btn size="sm" variant="ghost" onClick={()=>setForm({...form,nawi_repeatability:[...form.nawi_repeatability,{indication:''}]})}>+ Add Reading</Btn>
+
+          <div style={{fontWeight:700,fontSize:12,color:T.navy,margin:'14px 0 6px'}}>Eccentricity Test (5 positions — omit if not applicable)</div>
+          {form.nawi_eccentricity.map((e,idx)=>(
+            <div key={idx} style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1fr',gap:6,marginBottom:4}}>
+              <div style={{fontSize:12,padding:'8px 0',color:T.dgrey}}>{e.position}</div>
+              <Input label="" value={e.indication} onChange={v=>{const es=[...form.nawi_eccentricity];es[idx]={...e,indication:v};setForm({...form,nawi_eccentricity:es});}} type="number" placeholder="Indication"/>
+              <Input label="" value={e.deviation} onChange={v=>{const es=[...form.nawi_eccentricity];es[idx]={...e,deviation:v};setForm({...form,nawi_eccentricity:es});}} type="number" placeholder="Deviation"/>
+            </div>
+          ))}
+        </>)}
+
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:8}}><Btn variant="ghost" onClick={()=>setModal(null)}>Cancel</Btn><Btn onClick={issueCert} disabled={!form.client_id||!form.instrument||!form.uncertainty}>Issue & Sign Certificate</Btn></div>
       </Modal>
     )}
@@ -4770,6 +5323,7 @@ export default function Dashboard() {
       case 'fleet':        return <FleetModule api={api}/>;
       case 'hse':          return <HSE api={api}/>;
       case 'calibration':  return <CalibrationModule api={api}/>;
+      case 'sops':         return <SOPModule api={api} user={user}/>;
       case 'inspection':   return <InspectionModule api={api} user={user}/>;
       case 'bids':         return <BidsModule api={api}/>;
       case 'ic':           return <ICModule api={api}/>;

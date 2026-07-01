@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS employees (
   leave_balance     INTEGER DEFAULT 21,
   l_and_d_hours     REAL DEFAULT 0,
   l_and_d_target    REAL DEFAULT 40,
+  cpd_points        REAL DEFAULT 0,
+  cpd_target        REAL DEFAULT 20,
   created_at        TEXT DEFAULT (datetime('now')),
   updated_at        TEXT DEFAULT (datetime('now'))
 );
@@ -1123,6 +1125,12 @@ CREATE TABLE IF NOT EXISTS calibration_certs (
   tech_sig        TEXT,
   checked_by      TEXT REFERENCES employees(id),   -- "Checked By" second signatory (17025 template)
   checked_sig     TEXT,
+  checked_at      TEXT,
+  instrument_type TEXT DEFAULT 'general',          -- 'nawi' triggers EURAMET cg-18 full test-data certificate layout
+  temp_c_end      REAL,                             -- environmental conditions at END of test (cg-18 §8.2)
+  humidity_pct_end REAL,
+  min_weight      TEXT,                             -- NAWI minimum weight result (cg-18 §4 step 6)
+  repeatability_stdev REAL,                          -- computed from nawi_repeatability_readings
   cert_path       TEXT,
   etims_ref       TEXT,
   created_at      TEXT DEFAULT (datetime('now'))
@@ -1724,6 +1732,285 @@ CREATE INDEX IF NOT EXISTS idx_inspections_status ON inspections(status);
 CREATE INDEX IF NOT EXISTS idx_inspections_serial ON inspections(equipment_serial);
 CREATE INDEX IF NOT EXISTS idx_inspectors_employee ON inspectors(employee_id);
 CREATE INDEX IF NOT EXISTS idx_holdpoints_inspection ON civil_works_holdpoints(inspection_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- QSL DOCUMENT TEMPLATE INTEGRATION — Finance documents that did not
+-- previously have a backing table (Quotation, Debit/Credit Note, Travel
+-- Claim). Statement of Account is derived from tax_invoices and needs no
+-- new table. See TEMPLATE_INTEGRATION.md.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS quotes (
+  id              TEXT PRIMARY KEY,
+  quote_no        TEXT UNIQUE NOT NULL,
+  client_id       TEXT REFERENCES clients(id),
+  date            TEXT DEFAULT (date('now')),
+  valid_until     TEXT,
+  subtotal        REAL NOT NULL DEFAULT 0,
+  vat_amount      REAL DEFAULT 0,
+  total           REAL NOT NULL DEFAULT 0,
+  status          TEXT DEFAULT 'draft',
+  created_by      TEXT REFERENCES employees(id),
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS quote_lines (
+  id              TEXT PRIMARY KEY,
+  quote_id        TEXT REFERENCES quotes(id),
+  description     TEXT NOT NULL,
+  quantity        REAL DEFAULT 1,
+  unit_price      REAL NOT NULL,
+  total           REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS debit_notes (
+  id              TEXT PRIMARY KEY,
+  note_no         TEXT UNIQUE NOT NULL,
+  client_id       TEXT REFERENCES clients(id),
+  invoice_id      TEXT REFERENCES tax_invoices(id),
+  date            TEXT DEFAULT (date('now')),
+  amount          REAL NOT NULL,
+  reason          TEXT NOT NULL,
+  created_by      TEXT REFERENCES employees(id),
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS credit_notes (
+  id              TEXT PRIMARY KEY,
+  note_no         TEXT UNIQUE NOT NULL,
+  client_id       TEXT REFERENCES clients(id),
+  invoice_id      TEXT REFERENCES tax_invoices(id),
+  date            TEXT DEFAULT (date('now')),
+  amount          REAL NOT NULL,
+  reason          TEXT NOT NULL,
+  created_by      TEXT REFERENCES employees(id),
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS travel_claims (
+  id              TEXT PRIMARY KEY,
+  claim_no        TEXT UNIQUE NOT NULL,
+  employee_id     TEXT REFERENCES employees(id),
+  trip_purpose    TEXT NOT NULL,
+  from_date       TEXT NOT NULL,
+  to_date         TEXT NOT NULL,
+  destination     TEXT,
+  total_amount    REAL NOT NULL DEFAULT 0,
+  status          TEXT DEFAULT 'pending',
+  approved_by     TEXT REFERENCES employees(id),
+  approved_at     TEXT,
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS travel_claim_lines (
+  id              TEXT PRIMARY KEY,
+  claim_id        TEXT REFERENCES travel_claims(id),
+  date            TEXT,
+  description     TEXT NOT NULL,
+  amount          REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_client ON quotes(client_id);
+CREATE INDEX IF NOT EXISTS idx_debit_notes_client ON debit_notes(client_id);
+CREATE INDEX IF NOT EXISTS idx_credit_notes_client ON credit_notes(client_id);
+CREATE INDEX IF NOT EXISTS idx_travel_claims_employee ON travel_claims(employee_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- SOP LIBRARY — departmental Standard Operating Procedures with full
+-- revision history. sop_documents holds the current pointer; every
+-- revision (including the current one) is also recorded in
+-- sop_document_versions so earlier versions stay accessible/downloadable.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS sop_documents (
+  id                TEXT PRIMARY KEY,
+  code              TEXT UNIQUE NOT NULL,       -- e.g. QSL/QP/19
+  title             TEXT NOT NULL,
+  department        TEXT NOT NULL,              -- e.g. Technical, Commercial, Finance, HR
+  category          TEXT,                       -- e.g. Calibration, Procurement, Safety
+  current_version   INTEGER NOT NULL DEFAULT 1,
+  file_url          TEXT,                       -- current version's file
+  reviewed_by       TEXT REFERENCES employees(id),
+  reviewed_at       TEXT,
+  next_review_date  TEXT,
+  status            TEXT DEFAULT 'active',       -- active | superseded | withdrawn
+  created_by        TEXT REFERENCES employees(id),
+  created_at        TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sop_document_versions (
+  id                TEXT PRIMARY KEY,
+  sop_id            TEXT REFERENCES sop_documents(id),
+  version_no        INTEGER NOT NULL,
+  file_url          TEXT,
+  change_notes      TEXT,
+  uploaded_by       TEXT REFERENCES employees(id),
+  uploaded_at       TEXT DEFAULT (datetime('now')),
+  is_current        INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_sop_dept ON sop_documents(department);
+CREATE INDEX IF NOT EXISTS idx_sop_versions_sop ON sop_document_versions(sop_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- NAWI CALIBRATION TEST DATA — EURAMET Calibration Guide No. 18 compliance.
+-- calibration_certs previously stored one summary uncertainty/result for
+-- the whole instrument; for Non-Automatic Weighing Instruments the guide
+-- requires the actual error-of-indication test loads, the eccentricity
+-- test, and the repeatability readings to be recorded (§8.3), not just a
+-- final pass/fail. These tables capture that raw test data per
+-- certificate, and the certificate PDF prints it in full when present.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS nawi_test_points (
+  id              TEXT PRIMARY KEY,
+  cert_id         TEXT REFERENCES calibration_certs(id),
+  test_load       TEXT NOT NULL,   -- e.g. "0.5 Max" or an absolute value
+  indication      REAL,
+  error           REAL,
+  uncertainty     REAL,
+  sort_order      INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS nawi_repeatability_readings (
+  id              TEXT PRIMARY KEY,
+  cert_id         TEXT REFERENCES calibration_certs(id),
+  reading_no      INTEGER NOT NULL,
+  indication      REAL
+);
+
+CREATE TABLE IF NOT EXISTS nawi_eccentricity_readings (
+  id              TEXT PRIMARY KEY,
+  cert_id         TEXT REFERENCES calibration_certs(id),
+  position        TEXT NOT NULL,   -- Centre, Front-Left, Rear-Left, Rear-Right, Front-Right
+  indication      REAL,
+  deviation       REAL,
+  sort_order      INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_nawi_points_cert ON nawi_test_points(cert_id);
+CREATE INDEX IF NOT EXISTS idx_nawi_repeat_cert ON nawi_repeatability_readings(cert_id);
+CREATE INDEX IF NOT EXISTS idx_nawi_eccen_cert ON nawi_eccentricity_readings(cert_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- CPD (CONTINUOUS PROFESSIONAL DEVELOPMENT)
+-- Reuses the existing l_and_d table for the activity log (it already has
+-- course_name/provider/hours/certificate) but CPD is tracked in points,
+-- not just hours, against an explicit per-employee annual target, and is
+-- visible to both the employee's manager (reporting_to) and HR — not just
+-- HR as l_and_d_hours currently is.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cpd_platforms (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  url             TEXT NOT NULL,
+  description     TEXT,
+  is_active       INTEGER DEFAULT 1,
+  sort_order      INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cpd_logs (
+  id              TEXT PRIMARY KEY,
+  employee_id     TEXT REFERENCES employees(id),
+  platform_id     TEXT REFERENCES cpd_platforms(id),
+  activity        TEXT NOT NULL,
+  provider        TEXT,
+  points          REAL NOT NULL DEFAULT 0,
+  date_completed  TEXT NOT NULL,
+  certificate_url TEXT,
+  verification_url TEXT,             -- public verification link/code from the platform (e.g. Alison Learner Achievement Verification, Coursera Verify Certificate)
+  approved_by     TEXT REFERENCES employees(id),
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cpd_logs_employee ON cpd_logs(employee_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- MONTHLY SELF-APPRAISAL — pops up on each staff portal at month end.
+-- Employee submits achievements/self-score → manager (reporting_to)
+-- reviews and scores → HR reviews. Consecutive low scores trigger
+-- performance_warnings, escalating to a termination review.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS monthly_appraisals (
+  id                TEXT PRIMARY KEY,
+  employee_id       TEXT REFERENCES employees(id),
+  period            TEXT NOT NULL,              -- 'YYYY-MM'
+  achievements      TEXT,
+  challenges        TEXT,
+  next_month_plan   TEXT,
+  self_score        REAL,                        -- 0-100, employee's own rating
+  manager_score      REAL,                        -- 0-100, set by reporting_to
+  manager_comments   TEXT,
+  manager_id         TEXT REFERENCES employees(id),
+  manager_reviewed_at TEXT,
+  hr_reviewed_by     TEXT REFERENCES employees(id),
+  hr_reviewed_at      TEXT,
+  hr_comments         TEXT,
+  status              TEXT DEFAULT 'pending',     -- pending | submitted | manager_reviewed | hr_reviewed
+  created_at          TEXT DEFAULT (datetime('now')),
+  UNIQUE(employee_id, period)
+);
+
+CREATE TABLE IF NOT EXISTS performance_warnings (
+  id              TEXT PRIMARY KEY,
+  employee_id     TEXT REFERENCES employees(id),
+  level           TEXT NOT NULL,               -- warning | final_warning | termination_review
+  reason          TEXT NOT NULL,
+  trigger_period  TEXT,                         -- the appraisal period that triggered this
+  issued_by       TEXT REFERENCES employees(id),
+  issued_at       TEXT DEFAULT (datetime('now')),
+  status          TEXT DEFAULT 'active',        -- active | resolved | escalated
+  resolved_at     TEXT,
+  notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_appraisals_employee ON monthly_appraisals(employee_id);
+CREATE INDEX IF NOT EXISTS idx_warnings_employee ON performance_warnings(employee_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- TECHNICIAN JOB COMPLETION EVIDENCE — photos with GPS + timestamp proof
+-- of equipment serviced/repaired, tied to a field job. The lat/lng/captured_at
+-- are taken from the browser's geolocation API at the moment of upload (not
+-- EXIF, which web uploads frequently strip), and burned into the photo as a
+-- visible stamp so the evidence travels with the image itself.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS job_photos (
+  id              TEXT PRIMARY KEY,
+  job_id          TEXT REFERENCES calibration_jobs(id),
+  url             TEXT NOT NULL,
+  caption         TEXT,
+  lat             REAL,
+  lng             REAL,
+  captured_at     TEXT NOT NULL,
+  uploaded_by     TEXT REFERENCES employees(id),
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_photos_job ON job_photos(job_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- ISO/IEC 17020 — MANDATORY PRE-WORK / POST-WORK INSPECTION CHECKLISTS
+-- One record per field job per stage. A job cannot move to 'in_progress'
+-- without a passed pre-work check, and cannot move to 'complete' without
+-- a passed post-work check — enforced in the API, not just the UI.
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS job_work_inspections (
+  id              TEXT PRIMARY KEY,
+  job_id          TEXT REFERENCES calibration_jobs(id),
+  stage           TEXT NOT NULL,                -- 'pre' | 'post'
+  checklist       TEXT NOT NULL,                 -- JSON array of {item, ok, notes}
+  result          TEXT DEFAULT 'pending',        -- pass | fail | pending
+  inspector_id    TEXT REFERENCES employees(id),
+  sig             TEXT,                           -- RSA approval JSON
+  notes           TEXT,
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_inspections_job ON job_work_inspections(job_id);
 `;
 
 async function main() {

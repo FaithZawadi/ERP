@@ -36,6 +36,128 @@ export async function GET(req) {
       case 'transfers': {
         return ok(await query(`SELECT ct.*, c.name as client_name, f.first_name||' '||f.last_name as from_name, t.first_name||' '||t.last_name as to_name FROM client_transfers ct JOIN clients c ON ct.client_id=c.id JOIN employees f ON ct.from_owner=f.id JOIN employees t ON ct.to_owner=t.id ORDER BY ct.created_at DESC`));
       }
+
+      // QSL_ClientTransfer_Template — branded Client Transfer PDF
+      case 'transfer_pdf': {
+        if (!id) return err('id required', 400);
+        const t = await queryOne(
+          `SELECT ct.*, c.name as client_name, f.first_name||' '||f.last_name as from_name, tt.first_name||' '||tt.last_name as to_name
+           FROM client_transfers ct JOIN clients c ON ct.client_id=c.id
+           JOIN employees f ON ct.from_owner=f.id JOIN employees tt ON ct.to_owner=tt.id WHERE ct.id=?`, [id]);
+        if (!t) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('client_transfer', {
+          docNo: `CT-${t.id.slice(0, 8).toUpperCase()}`,
+          blocks: {
+            Client:   { Name: t.client_name, Status: t.status },
+            Transfer: { From: t.from_name, To: t.to_name },
+          },
+          body: [
+            `Reason for transfer: ${t.reason || '—'}`,
+            `CFO sign-off: ${t.cfo_signed_at ? 'Signed ' + new Date(t.cfo_signed_at).toLocaleDateString('en-KE') : 'Pending'}`,
+            `MD sign-off: ${t.md_signed_at ? 'Signed ' + new Date(t.md_signed_at).toLocaleDateString('en-KE') : 'Pending'}`,
+          ],
+        });
+        return ok(result);
+      }
+
+      // QSL_NDA_Template — branded NDA PDF for a client/counterparty
+      case 'nda_pdf': {
+        if (!id) return err('id required', 400);
+        const client = await queryOne(`SELECT * FROM clients WHERE id=?`, [id]);
+        if (!client) return err('Client not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('nda', {
+          docNo: `NDA-${client.code}`,
+          blocks: { Party: { 'Counterparty': client.name, 'Contact': client.contact_person, Email: client.email } },
+          body: [
+            `This Non-Disclosure Agreement is entered into between Qalibrated Systems Limited ("QSL") and ${client.name} ("the Counterparty") for the purpose of protecting confidential information exchanged in the course of their business relationship.`,
+            'Both parties agree to hold all shared technical, commercial, and operational information in strict confidence, and not to disclose it to any third party without prior written consent, for a period of two (2) years from the date of signature.',
+          ],
+        });
+        return ok(result);
+      }
+      // QSL_LeadCaptureForm_Template — branded Lead Capture Form PDF
+      case 'lead_pdf': {
+        if (!id) return err('id required', 400);
+        const lead = await queryOne(`SELECT l.*, e.first_name||' '||e.last_name as owner_name FROM leads l LEFT JOIN employees e ON l.owner=e.id WHERE l.id=?`, [id]);
+        if (!lead) return err('Lead not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('lead_capture', {
+          docNo: lead.ref_no,
+          blocks: {
+            Lead:   { Company: lead.company, Contact: lead.contact_name, Email: lead.email, Phone: lead.phone },
+            Source: { Source: lead.source || '—', Service: lead.service, 'Est. Value': `Kshs ${Number(lead.estimated_value||0).toLocaleString('en-KE')}` },
+          },
+          body: [`Captured by: ${lead.owner_name || '—'}`, `Stage: ${lead.stage}`],
+        });
+        return ok(result);
+      }
+
+      // QSL_ClientVisitReport_Template — branded Client Visit Report PDF (from an interaction)
+      case 'visit_pdf': {
+        if (!id) return err('id required', 400);
+        const visit = await queryOne(
+          `SELECT i.*, c.name as client_name, e.first_name||' '||e.last_name as done_by_name
+           FROM interactions i LEFT JOIN clients c ON i.client_id=c.id LEFT JOIN employees e ON i.done_by=e.id WHERE i.id=?`, [id]);
+        if (!visit) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('client_visit', {
+          docNo: `CVR-${visit.id.slice(0, 8).toUpperCase()}`,
+          blocks: {
+            Client: { Name: visit.client_name || '—', Type: visit.type },
+            Visit:  { Date: visit.date, 'Reported by': visit.done_by_name },
+          },
+          body: [`Summary: ${visit.summary}`, `Next action: ${visit.next_action || 'None recorded'}`],
+        });
+        return ok(result);
+      }
+
+      // QSL_ContractCoverSheet_Template — branded Contract Cover Sheet PDF
+      case 'contract_pdf': {
+        if (!id) return err('id required', 400);
+        const client = await queryOne(`SELECT c.*, e.first_name||' '||e.last_name as owner_name FROM clients c LEFT JOIN employees e ON c.account_owner=e.id WHERE c.id=?`, [id]);
+        if (!client) return err('Client not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('contract_cover', {
+          docNo: `CONTRACT-${client.code}`,
+          blocks: {
+            Client:   { Name: client.name, PIN: client.kra_pin, 'Account Owner': client.owner_name },
+            Contract: { 'Payment Terms': `${client.payment_terms} days`, 'Credit Limit': `Kshs ${Number(client.credit_limit||0).toLocaleString('en-KE')}` },
+          },
+          body: [
+            `This cover sheet accompanies the services agreement between Qalibrated Systems Limited and ${client.name}.`,
+            'Attach the full signed contract / agreement document behind this cover sheet for filing.',
+          ],
+        });
+        return ok(result);
+      }
+
+      // QSL_ClientOnboarding_Template — branded Client Onboarding PDF
+      case 'onboarding_pdf': {
+        if (!id) return err('id required', 400);
+        const client = await queryOne(`SELECT c.*, e.first_name||' '||e.last_name as owner_name FROM clients c LEFT JOIN employees e ON c.account_owner=e.id WHERE c.id=?`, [id]);
+        if (!client) return err('Client not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('client_onboarding', {
+          docNo: `ONB-${client.code}`,
+          blocks: {
+            Client:  { Name: client.name, Contact: client.contact_person, Email: client.email, Phone: client.phone },
+            Account: { Segment: client.segment, 'Account Owner': client.owner_name, 'Payment Terms': `${client.payment_terms} days` },
+          },
+          body: [
+            `Client onboarded on ${new Date(client.created_at).toLocaleDateString('en-KE')}.`,
+            `KRA PIN: ${client.kra_pin || 'Not yet captured'}. Address: ${client.address || 'Not yet captured'}.`,
+          ],
+        });
+        return ok(result);
+      }
       default:
         return err('Unknown section', 400);
     }

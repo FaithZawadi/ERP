@@ -43,6 +43,95 @@ export async function GET(req) {
       case 'inventory': {
         return ok(await query(`SELECT * FROM items WHERE is_active=1 ORDER BY category, name`));
       }
+
+      // QSL_PurchaseRequisition_Template — generates a branded PR PDF
+      case 'pr_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const pr = await queryOne(
+          `SELECT pr.*, e.first_name||' '||e.last_name as requestor_name, s.name as supplier_name
+           FROM purchase_requisitions pr
+           LEFT JOIN employees e ON pr.requested_by=e.id
+           LEFT JOIN suppliers s ON pr.supplier_id=s.id WHERE pr.id=?`, [id]);
+        if (!pr) return err('Not found', 404);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('purchase_req', {
+          docNo: pr.pr_no,
+          blocks: {
+            Requester: { Name: pr.requestor_name, Department: pr.department, Date: new Date(pr.created_at).toLocaleDateString('en-KE') },
+            Purpose:   { Purpose: pr.purpose, Supplier: pr.supplier_name || 'TBD', Status: pr.status },
+          },
+          columns: [
+            { label: 'Description', key: 'description', weight: 3 },
+            { label: 'Amount (Kshs)', key: 'amount', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+          ],
+          rows: [{ description: pr.description, amount: pr.amount }],
+          totals: [{ label: 'TOTAL', value: `Kshs ${Number(pr.amount||0).toLocaleString('en-KE')}` }],
+        });
+        return ok(result);
+      }
+
+      // QSL_PurchaseOrder_Template — generates a branded LPO PDF
+      case 'lpo_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const lpo = await queryOne(`SELECT l.*, s.name as supplier_name, s.address as supplier_address, s.kra_pin as supplier_pin
+                                     FROM lpos l LEFT JOIN suppliers s ON l.supplier_id=s.id WHERE l.id=?`, [id]);
+        if (!lpo) return err('Not found', 404);
+        const lines = await query(`SELECT * FROM lpo_lines WHERE lpo_id=?`, [id]);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('purchase_order', {
+          docNo: lpo.lpo_no,
+          blocks: {
+            Supplier: { Name: lpo.supplier_name, PIN: lpo.supplier_pin, Address: lpo.supplier_address },
+            Delivery: { Date: lpo.delivery_date, Currency: lpo.currency, 'FX Rate': lpo.fx_rate },
+          },
+          columns: [
+            { label: 'Description', key: 'description', weight: 3 },
+            { label: 'Qty', key: 'quantity', weight: 1, align: 'right' },
+            { label: 'Unit Price', key: 'unit_price', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+            { label: 'Total', key: 'total', weight: 1, align: 'right', format: v => Number(v||0).toLocaleString('en-KE') },
+          ],
+          rows: lines,
+          totals: [
+            { label: 'Subtotal', value: Number(lpo.total||0).toLocaleString('en-KE') },
+            { label: 'VAT',      value: Number(lpo.vat||0).toLocaleString('en-KE') },
+            { label: 'GRAND TOTAL', value: `Kshs ${Number(lpo.grand_total||0).toLocaleString('en-KE')}` },
+          ],
+          notes: lpo.landed_cost ? `Landed cost (incl. duty/freight/insurance/FX buffer): Kshs ${Number(lpo.landed_cost).toLocaleString('en-KE')}` : '',
+        });
+        return ok(result);
+      }
+
+      // QSL_GRN_Template — generates a branded Goods Received Note PDF
+      case 'grn_pdf': {
+        const id = searchParams.get('id');
+        if (!id) return err('id required', 400);
+        const grn = await queryOne(
+          `SELECT g.*, l.lpo_no, s.name as supplier_name
+           FROM grns g JOIN lpos l ON g.lpo_id=l.id JOIN suppliers s ON l.supplier_id=s.id WHERE g.id=?`, [id]);
+        if (!grn) return err('Not found', 404);
+        const lines = await query(`SELECT * FROM lpo_lines WHERE lpo_id=?`, [grn.lpo_id]);
+        const { generateBusinessDoc, loadCompany } = require('../../../lib/pdf');
+        await loadCompany();
+        const result = await generateBusinessDoc('grn', {
+          docNo: grn.grn_no,
+          blocks: {
+            Supplier: { Name: grn.supplier_name, 'LPO No': grn.lpo_no },
+            Order:    { Date: grn.date, 'Stage 1': grn.stage1_done ? 'Done' : 'Pending', 'Stage 2': grn.stage2_done ? 'Done' : 'Pending' },
+          },
+          columns: [
+            { label: 'Description', key: 'description', weight: 3 },
+            { label: 'Qty Received', key: 'quantity', weight: 1, align: 'right' },
+            { label: 'Unit', key: 'unit', weight: 1 },
+          ],
+          rows: lines,
+          notes: grn.stage1_notes || '',
+        });
+        return ok(result);
+      }
       default:
         return err('Unknown section', 400);
     }
